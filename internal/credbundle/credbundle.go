@@ -38,6 +38,17 @@ func Loader(path string) func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
 	}
 }
 
+// ClientLoader reads a private key and certificate chain from a credential bundle file as written
+// by the Kubernetes Pod Certificates mechanism.
+//
+// Returns a function that can be used as GetClientCertificate in a tls.Config. Like Loader, it
+// re-reads the bundle on every handshake so rotated credentials are picked up.
+func ClientLoader(path string) func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+	return func(_ *tls.CertificateRequestInfo) (*tls.Certificate, error) {
+		return Parse(path)
+	}
+}
+
 // Parse reads a private key and certificate chain from a credential bundle file as written by the
 // Kubernetes Pod Certificates mechanism.
 func Parse(bundlePath string) (*tls.Certificate, error) {

@@ -20,9 +20,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/agent-substrate/substrate/internal/atemetadata"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
@@ -58,7 +60,7 @@ func TestActorResumer_ResumeActor(t *testing.T) {
 		}
 
 		resumer := NewActorResumer(mock)
-		actor, err := resumer.ResumeActor(context.Background(), testActorID)
+		actor, err := resumer.ResumeActor(context.Background(), testActorID, "")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -89,7 +91,7 @@ func TestActorResumer_ResumeActor(t *testing.T) {
 		}
 
 		resumer := NewActorResumer(mock)
-		actor, err := resumer.ResumeActor(context.Background(), testActorID)
+		actor, err := resumer.ResumeActor(context.Background(), testActorID, "")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -109,9 +111,60 @@ func TestActorResumer_ResumeActor(t *testing.T) {
 		}
 
 		resumer := NewActorResumer(mock)
-		_, err := resumer.ResumeActor(context.Background(), testActorID)
+		_, err := resumer.ResumeActor(context.Background(), testActorID, "")
 		if got := status.Code(err); got != codes.NotFound {
 			t.Errorf("expected gRPC code NotFound, got %v (err=%v)", got, err)
+		}
+	})
+
+	t.Run("ForwardsJWTMetadata", func(t *testing.T) {
+		const token = "header.payload.signature"
+		var gotJWT []string
+		mock := &resumerMockClient{
+			resumeFn: func(ctx context.Context, in *ateapipb.ResumeActorRequest, opts ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error) {
+				md, _ := metadata.FromOutgoingContext(ctx)
+				gotJWT = md.Get(atemetadata.ForwardedJWTKey)
+				return &ateapipb.ResumeActorResponse{
+					Actor: &ateapipb.Actor{
+						ActorId:    testActorID,
+						Status:     ateapipb.Actor_STATUS_RUNNING,
+						AteomPodIp: expectedIP,
+					},
+				}, nil
+			},
+		}
+
+		resumer := NewActorResumer(mock)
+		if _, err := resumer.ResumeActor(context.Background(), testActorID, token); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(gotJWT) != 1 || gotJWT[0] != token {
+			t.Errorf("forwarded JWT metadata = %v, want [%q]", gotJWT, token)
+		}
+	})
+
+	t.Run("NoJWTMetadataWhenAbsent", func(t *testing.T) {
+		var gotJWT []string
+		mock := &resumerMockClient{
+			resumeFn: func(ctx context.Context, in *ateapipb.ResumeActorRequest, opts ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error) {
+				md, _ := metadata.FromOutgoingContext(ctx)
+				gotJWT = md.Get(atemetadata.ForwardedJWTKey)
+				return &ateapipb.ResumeActorResponse{
+					Actor: &ateapipb.Actor{
+						ActorId:    testActorID,
+						Status:     ateapipb.Actor_STATUS_RUNNING,
+						AteomPodIp: expectedIP,
+					},
+				}, nil
+			},
+		}
+
+		resumer := NewActorResumer(mock)
+		if _, err := resumer.ResumeActor(context.Background(), "actor-without-jwt", ""); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(gotJWT) != 0 {
+			t.Errorf("forwarded JWT metadata = %v, want none", gotJWT)
 		}
 	})
 
@@ -146,7 +199,7 @@ func TestActorResumer_ResumeActor(t *testing.T) {
 		for i := 0; i < concurrentRequests; i++ {
 			go func(idx int) {
 				defer wg.Done()
-				results[idx], errs[idx] = resumer.ResumeActor(context.Background(), testActorID)
+				results[idx], errs[idx] = resumer.ResumeActor(context.Background(), testActorID, "")
 			}(i)
 		}
 		wg.Wait()

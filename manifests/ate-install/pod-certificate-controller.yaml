@@ -63,6 +63,7 @@ rules:
   resources:
   - signers
   resourceNames:
+  # Again the goal here is to make sure the CA pools for ate-system and 
   - servicedns.podcert.ate.dev/*
   - podidentity.podcert.ate.dev/*
   verbs:

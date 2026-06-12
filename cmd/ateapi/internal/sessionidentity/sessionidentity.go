@@ -24,17 +24,15 @@ import (
 	"net/url"
 	"os"
 	"path"
-	"strings"
 	"time"
 
-	"github.com/agent-substrate/substrate/internal/k8sjwt"
+	"github.com/agent-substrate/substrate/cmd/ateapi/internal/authn"
 	"github.com/agent-substrate/substrate/internal/localca"
 	"github.com/agent-substrate/substrate/internal/localjwtauthority"
 	"github.com/agent-substrate/substrate/internal/sessionidjwt"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 )
@@ -43,8 +41,10 @@ import (
 type Server struct {
 	ateapipb.UnimplementedSessionIdentityServer
 
-	clientJWTIssuer   string
-	clientJWTAudience string
+	// sessionJWTIssuer is the issuer URL stamped on minted session JWTs. It
+	// must be the URL where the broker serves its OIDC discovery document so
+	// relying parties can fetch the verification keys.
+	sessionJWTIssuer string
 
 	// TODO: Cache the signing keys in memory, so we don't read from a file every time.
 	sessionIDJWTPoolFile string
@@ -55,10 +55,9 @@ type Server struct {
 
 var _ ateapipb.SessionIdentityServer = (*Server)(nil)
 
-func New(clientJWTIssuer, clientJWTAudience, sessionIDJWTPoolFile, sessionIDCAPoolFile, workerCACerts string) *Server {
+func New(sessionJWTIssuer, sessionIDJWTPoolFile, sessionIDCAPoolFile, workerCACerts string) *Server {
 	return &Server{
-		clientJWTIssuer:      clientJWTIssuer,
-		clientJWTAudience:    clientJWTAudience,
+		sessionJWTIssuer:     sessionJWTIssuer,
 		sessionIDJWTPoolFile: sessionIDJWTPoolFile,
 		sessionIDCAPoolFile:  sessionIDCAPoolFile,
 		workerCACerts:        workerCACerts,
@@ -66,29 +65,19 @@ func New(clientJWTIssuer, clientJWTAudience, sessionIDJWTPoolFile, sessionIDCAPo
 }
 
 func (s *Server) MintJWT(ctx context.Context, req *ateapipb.MintJWTRequest) (*ateapipb.MintJWTResponse, error) {
-	reqMetadata, ok := metadata.FromIncomingContext(ctx)
-	if !ok {
-		return nil, fmt.Errorf("no metadata found")
-	}
-
-	authorization := reqMetadata["authorization"]
-	if len(authorization) != 1 {
-		return nil, status.Errorf(codes.Unauthenticated, "Need authorization header")
-	}
-
-	clientJWT := strings.TrimPrefix(authorization[0], "Bearer ")
-
-	clientClaims, err := k8sjwt.Verify(ctx, clientJWT, s.clientJWTIssuer, s.clientJWTAudience, time.Now())
-	if err != nil {
-		slog.ErrorContext(ctx, "Error while verifying client JWT", slog.Any("err", err))
+	// The authentication interceptor has already verified the caller's JWT;
+	// minting requires a k8s-jwt principal.
+	principal := authn.FromContext(ctx)
+	if principal.Kind != authn.KindK8sJWT {
+		slog.WarnContext(ctx, "Rejecting MintJWT call from non-k8s-jwt principal", slog.String("kind", string(principal.Kind)), slog.String("id", principal.ID))
 		return nil, status.Errorf(codes.Unauthenticated, "Unauthenticated")
 	}
 
-	slog.InfoContext(ctx, "Verified client JWT", slog.Any("claims", clientClaims))
+	slog.InfoContext(ctx, "Authenticated MintJWT client", slog.String("id", principal.ID))
 
-	// TODO: Extract K8s identity from incoming JWT
-
-	// TODO: Cross-check requested session and user claims against the session database.
+	// TODO: Cross-check requested session and user claims against the session
+	// database, using the caller's Kubernetes claims from
+	// principal.Token.Kubernetes().
 
 	// TODO: Cache signing keys in memory, so we don't read from disk every time.
 	signingPoolBytes, err := os.ReadFile(s.sessionIDJWTPoolFile)
@@ -107,7 +96,7 @@ func (s *Server) MintJWT(ctx context.Context, req *ateapipb.MintJWTRequest) (*at
 	}
 
 	sessionClaims := &sessionidjwt.Claims{
-		Issuer:     "https://broker.agentic-substrate-session-id-broker.svc", // TODO: This needs to be globally unique.
+		Issuer:     s.sessionJWTIssuer,
 		Subject:    fmt.Sprintf("apps/%s/users/%s/sessions/%s", req.GetAppId(), req.GetUserId(), req.GetSessionId()),
 		Audiences:  req.GetAudience(),
 		Expiration: time.Now().Add(15 * time.Minute),

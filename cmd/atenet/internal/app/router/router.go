@@ -46,6 +46,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 
+	"github.com/agent-substrate/substrate/internal/credbundle"
 	"github.com/agent-substrate/substrate/internal/serverboot"
 	v1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
@@ -62,22 +63,24 @@ func init() {
 
 // RouterConfig holds deployment setup and endpoint options for the router node instance.
 type RouterConfig struct {
-	Standalone     bool
-	Namespace      string
-	Kubeconfig     string
-	AteapiAddr     string
-	HttpPort       int
-	XdsPort        int
-	ExtprocPort    int
-	ExtprocAddr    string
-	EnvoyImage     string
-	TemplatesFile  string
-	StatusPort     int
-	HealthInterval time.Duration
-	HttpsPort      int
-	EnvoyCertPath  string
-	LogLevel       string
-	MetricsAddr    string
+	Standalone             bool
+	Namespace              string
+	Kubeconfig             string
+	AteapiAddr             string
+	AteapiClientCredBundle string
+	AteapiServerCA         string
+	HttpPort               int
+	XdsPort                int
+	ExtprocPort            int
+	ExtprocAddr            string
+	EnvoyImage             string
+	TemplatesFile          string
+	StatusPort             int
+	HealthInterval         time.Duration
+	HttpsPort              int
+	EnvoyCertPath          string
+	LogLevel               string
+	MetricsAddr            string
 }
 
 // RouterServer instantiates and coordinates runtime threads executing system modules.
@@ -147,6 +150,8 @@ func NewCmd() *cobra.Command {
 	cmd.Flags().StringVar(&cfg.Namespace, "namespace", "default", "Target operations namespace")
 	cmd.Flags().StringVar(&cfg.Kubeconfig, "kubeconfig", "", "Absolute path to the kubeconfig configuration file")
 	cmd.Flags().StringVar(&cfg.AteapiAddr, "ateapi-address", "api.ate-system.svc:443", "gRPC host address of the cluster ateapi Control instance")
+	cmd.Flags().StringVar(&cfg.AteapiClientCredBundle, "ateapi-client-cred-bundle", "", "Path to the client TLS credential bundle presented when dialing ateapi. If empty, no client certificate is presented.")
+	cmd.Flags().StringVar(&cfg.AteapiServerCA, "ateapi-server-ca", "", "Path to the CA bundle used to verify the ateapi server certificate. If empty, server certificate verification is skipped (testing only).")
 	cmd.Flags().IntVar(&cfg.HttpPort, "port-http", 8080, "TCP port for workload traffic entering through the Envoy Router")
 	cmd.Flags().IntVar(&cfg.XdsPort, "port-xds", 18000, "TCP port listening for the xDS dynamic Envoy connections")
 	cmd.Flags().IntVar(&cfg.ExtprocPort, "port-extproc", 50051, "Listen port for the Envoy dynamic External Processing (ext_proc) server")
@@ -159,6 +164,32 @@ func NewCmd() *cobra.Command {
 	cmd.Flags().StringVar(&cfg.EnvoyCertPath, "envoy-cert-path", "", "Path to the Envoy certificate file (if empty, a self-signed cert will be generated for testing)")
 
 	return cmd
+}
+
+func buildTLSConfig(cfg RouterConfig) (*tls.Config, error) {
+	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
+	if cfg.AteapiServerCA != "" {
+		caBytes, err := os.ReadFile(cfg.AteapiServerCA)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read ateapi server CA bundle: %w", err)
+		}
+		roots := x509.NewCertPool()
+		if ok := roots.AppendCertsFromPEM(caBytes); !ok {
+			return nil, fmt.Errorf("failed to parse ateapi server CA bundle from %s", cfg.AteapiServerCA)
+		}
+		tlsCfg.RootCAs = roots
+	} else {
+		slog.Warn("No ateapi server CA configured, skipping ateapi server certificate verification")
+		tlsCfg.InsecureSkipVerify = true
+	}
+	if cfg.AteapiClientCredBundle != "" {
+		// Present the router's service-dns identity so the apiserver
+		// authenticates the router as a system principal and accepts the
+		// actor JWTs it forwards.
+		// TODO: This client cred bundle should include a spiffe URI that represents the client.
+		tlsCfg.GetClientCertificate = credbundle.ClientLoader(cfg.AteapiClientCredBundle)
+	}
+	return tlsCfg, nil
 }
 
 func NewRouterServer(cfg RouterConfig) (*RouterServer, error) {
@@ -193,7 +224,11 @@ func NewRouterServer(cfg RouterConfig) (*RouterServer, error) {
 		}
 	}
 
-	conn, err := grpc.NewClient(cfg.AteapiAddr, grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{InsecureSkipVerify: true})))
+	tlsCfg, err := buildTLSConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := grpc.NewClient(cfg.AteapiAddr, grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)))
 	if err != nil {
 		return nil, fmt.Errorf("failed to establish grpc channel to ateapi client: %w", err)
 	}

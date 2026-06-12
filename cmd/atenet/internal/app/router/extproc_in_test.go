@@ -15,8 +15,8 @@
 package router
 
 import (
-	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -124,14 +124,59 @@ func TestRequestMetadata_String(t *testing.T) {
 	headers := []*corev3.HeaderValue{
 		{Key: ":path", Value: "/api/v1/test"},
 		{Key: ":authority", Value: "example.com"},
+		{Key: "Authorization", Value: "Bearer secret-token"},
+		{Key: "x-substrate-forwarded-jwt", Value: "secret-forwarded-token"},
 	}
 	m := newRequestMetadata(headers)
 	str := m.String()
 	if str == "" {
 		t.Errorf("expected non-empty string from String()")
 	}
-	if !reflect.DeepEqual(str, fmt.Sprintf("%+v", *m)) {
-		t.Errorf("String() = %q, want %q", str, fmt.Sprintf("%+v", *m))
+	if !strings.Contains(str, "example.com") || !strings.Contains(str, "/api/v1/test") {
+		t.Errorf("String() = %q, want it to contain the host and path", str)
+	}
+	// Credential-bearing headers must never appear in logs.
+	for _, secret := range []string{"secret-token", "secret-forwarded-token"} {
+		if strings.Contains(str, secret) {
+			t.Errorf("String() = %q, must not contain credential %q", str, secret)
+		}
+	}
+}
+
+func TestRequestMetadata_BearerToken(t *testing.T) {
+	tests := []struct {
+		name    string
+		headers []*corev3.HeaderValue
+		want    string
+	}{
+		{
+			name: "bearer token",
+			headers: []*corev3.HeaderValue{
+				{Key: "Authorization", Value: "Bearer some.jwt.token"},
+			},
+			want: "some.jwt.token",
+		},
+		{
+			name:    "no authorization header",
+			headers: nil,
+			want:    "",
+		},
+		{
+			name: "non-bearer authorization",
+			headers: []*corev3.HeaderValue{
+				{Key: "Authorization", Value: "Basic dXNlcjpwYXNz"},
+			},
+			want: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newRequestMetadata(tc.headers)
+			if got := m.bearerToken(); got != tc.want {
+				t.Errorf("bearerToken() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

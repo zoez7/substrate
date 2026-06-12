@@ -173,6 +173,7 @@ func (s *CallAteletRestoreStep) Execute(ctx context.Context, input *ResumeInput,
 	if err != nil {
 		return err
 	}
+	// This is where we call atelet, let's check how atelet authorizes.
 	client := ateletpb.NewAteomHerderClient(ateletConn)
 
 	workloadSpec, err := workloadSpecFromActorTemplate(ctx, s.kubeClient, s.secretCache, state.ActorTemplate)

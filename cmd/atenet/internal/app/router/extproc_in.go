@@ -19,6 +19,7 @@ import (
 	"net"
 	"strings"
 
+	"github.com/agent-substrate/substrate/internal/atemetadata"
 	"github.com/agent-substrate/substrate/internal/resources"
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 )
@@ -29,8 +30,32 @@ type requestMetadata struct {
 	host    string
 }
 
+// redactedHeaders are credential-bearing headers whose values must never be
+// logged.
+var redactedHeaders = map[string]struct{}{
+	"authorization":             {},
+	atemetadata.ForwardedJWTKey: {},
+}
+
 func (m *requestMetadata) String() string {
-	return fmt.Sprintf("%+v", *m)
+	headers := make(map[string]string, len(m.headers))
+	for k, v := range m.headers {
+		if _, ok := redactedHeaders[k]; ok {
+			v = "[REDACTED]"
+		}
+		headers[k] = v
+	}
+	return fmt.Sprintf("{headers:%v path:%s host:%s}", headers, m.path, m.host)
+}
+
+// bearerToken returns the Bearer token from the request's authorization
+// header, or "" when the header is absent or not a Bearer credential.
+func (m *requestMetadata) bearerToken() string {
+	token, ok := strings.CutPrefix(m.headers["authorization"], "Bearer ")
+	if !ok {
+		return ""
+	}
+	return token
 }
 
 func newRequestMetadata(headers []*corev3.HeaderValue) *requestMetadata {
@@ -39,6 +64,7 @@ func newRequestMetadata(headers []*corev3.HeaderValue) *requestMetadata {
 	var host string
 
 	for _, h := range headers {
+		// Note: Lowercases all headers.
 		k := strings.ToLower(h.Key)
 		val := h.Value
 		if val == "" && len(h.RawValue) > 0 {

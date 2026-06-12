@@ -163,6 +163,12 @@ func buildDeploymentApplyConfig(wp *atev1alpha1.WorkerPool) *appsv1ac.Deployment
 					WithVolumes(corev1ac.Volume().
 						WithName("run-ateom").
 						WithHostPath(corev1ac.HostPathVolumeSource().
+							// Note: this mounts the entire /var/lib/ateom-gvisor Path.
+							// Is it possible to mount only the "POD_UID" path instead of all?
+							// No, because this won't work?
+							// name: run-ateom
+							// hostPath:
+							// path: /var/lib/ateom-gvisor/ateoms/$(POD_UID) # <--- Won't work!
 							WithPath(ateompath.BasePath).
 							WithType(corev1.HostPathDirectoryOrCreate))))))
 }

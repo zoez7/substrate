@@ -162,6 +162,11 @@ create_podcertificate_controller_cas() {
     --ca-id="1" \
     --name="pod-identity-ca-pool" \
     --secret-namespace=podcertificate-controller-system
+  # Create a CA pool that ate-system components use.
+  run_kubectl_ate admin make-ca-pool \
+    --ca-id="1" \
+    --name="ate-system-service-dns-ca-pool" \
+    --secret-namespace=podcertificate-controller-system
 }
 
 create_api_server_env_vars() {
@@ -180,6 +185,17 @@ create_api_server_env_vars() {
 
   echo "REDIS_ADDRESS: ${redis_address}"
 
+  run_kubectl create configmap -n ate-system ate-api-server-envvars \
+    --from-literal=ATE_API_REDIS_ADDRESS="${redis_address}" \
+    --from-literal=ATE_API_REDIS_USE_IAM_AUTH="${use_iam_auth}" \
+    --from-literal=ATE_API_REDIS_TLS_SERVER_NAME="${tls_server_name}" \
+    --from-literal=ATE_API_REDIS_CLIENT_CERT="${client_cert}" \
+    --dry-run=client -o yaml \
+    | run_kubectl apply -f -
+}
+
+# detect_k8s_jwt_issuer prints the cluster's service account JWT issuer URL.
+detect_k8s_jwt_issuer() {
   local jwt_issuer=""
   if [[ -n "${PROJECT_ID:-}" && -n "${CLUSTER_LOCATION:-}" && -n "${CLUSTER_NAME:-}" ]]; then
     jwt_issuer="https://container.googleapis.com/v1/projects/${PROJECT_ID}/locations/${CLUSTER_LOCATION}/clusters/${CLUSTER_NAME}"
@@ -189,13 +205,39 @@ create_api_server_env_vars() {
       jwt_issuer="https://kubernetes.default.svc"
     fi
   fi
+  echo "${jwt_issuer}"
+}
 
-  run_kubectl create configmap -n ate-system ate-api-server-envvars \
-    --from-literal=ATE_API_REDIS_ADDRESS="${redis_address}" \
-    --from-literal=ATE_API_REDIS_USE_IAM_AUTH="${use_iam_auth}" \
-    --from-literal=ATE_API_REDIS_TLS_SERVER_NAME="${tls_server_name}" \
-    --from-literal=ATE_API_REDIS_CLIENT_CERT="${client_cert}" \
-    --from-literal=ATE_API_K8SJWT_ISSUER="${jwt_issuer}" \
+# create_oidc_configs_configmap renders the trusted OIDC issuer configuration
+# consumed by the apiserver's authentication interceptor (--oidc-configs):
+# the cluster's service account issuer maps to k8s-jwt principals and the
+# session-id broker maps to actor-jwt principals.
+create_oidc_configs_configmap() {
+  log_step "create_oidc_configs_configmap"
+  local jwt_issuer
+  jwt_issuer=$(detect_k8s_jwt_issuer)
+
+  local configs_json
+  configs_json=$(cat <<EOF
+{
+  "issuers": [
+    {
+      "issuer": "${jwt_issuer}",
+      "kind": "k8s-jwt",
+      "audiences": ["api.ate-system.svc"]
+    },
+    {
+      "issuer": "https://broker.ate-system.svc",
+      "kind": "actor-jwt",
+      "audiences": ["api.ate-system.svc"]
+    }
+  ]
+}
+EOF
+)
+
+  run_kubectl create configmap -n ate-system ate-api-server-oidc-configs \
+    --from-literal=configs.json="${configs_json}" \
     --dry-run=client -o yaml \
     | run_kubectl apply -f -
 }
@@ -268,6 +310,8 @@ ensure_apiserver_prerequisites() {
     || create_valkey_ca_certs_secret
   run_kubectl get configmap -n ate-system ate-api-server-envvars >/dev/null 2>&1 \
     || create_api_server_env_vars
+  # Always re-applied (idempotent) so kind/issuer changes propagate on redeploy.
+  create_oidc_configs_configmap
 }
 
 # Redeploy only the ate-apiserver

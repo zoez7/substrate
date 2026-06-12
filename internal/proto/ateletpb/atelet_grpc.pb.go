@@ -61,6 +61,7 @@ func NewAteomHerderClient(cc grpc.ClientConnInterface) AteomHerderClient {
 	return &ateomHerderClient{cc}
 }
 
+// Note: so we still have atelet, but its a lean one. Why not API server talk to ateom directly?
 func (c *ateomHerderClient) Run(ctx context.Context, in *RunRequest, opts ...grpc.CallOption) (*RunResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(RunResponse)

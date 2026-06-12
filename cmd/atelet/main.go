@@ -64,6 +64,8 @@ var (
 	localhostRegistryReplacement = pflag.String("localhost-registry-replacement", "", "The replacement registry endpoint for localhost and/or loopback IP addresses, useful for local development. for example kind-registry:5000")
 
 	showVersion = pflag.Bool("version", false, "Print version and exit.")
+
+	// Note: there is no trust bundle here.
 )
 
 func main() {
@@ -168,6 +170,7 @@ func main() {
 		serverboot.Fatal(ctx, "Failed to listen", err)
 	}
 
+	// Yup I don't see any authentication or TLS here.
 	svr := grpc.NewServer(grpc.StatsHandler(otelgrpc.NewServerHandler()), grpc.UnaryInterceptor(ateinterceptors.ServerUnaryInterceptor))
 	ateletpb.RegisterAteomHerderServer(svr, wmService)
 	reflection.Register(svr)
@@ -292,6 +295,7 @@ func (s *AteomHerder) Run(ctx context.Context, req *ateletpb.RunRequest) (*atele
 		return nil, err
 	}
 
+	// This is where it calls Ateom on unix socket.
 	client, err := s.dialAteom(ctx, req.GetTargetAteomUid())
 	if err != nil {
 		return nil, err
@@ -348,6 +352,7 @@ func recordSnapshotSize(ctx context.Context, kind, path, atNamespace, atName str
 	))
 }
 
+// Note: AteomHerder impl.
 func (s *AteomHerder) Checkpoint(ctx context.Context, req *ateletpb.CheckpointRequest) (*ateletpb.CheckpointResponse, error) {
 	runscPath, err := s.fetchRunscAndPrep(ctx, req.GetRunsc())
 	if err != nil {

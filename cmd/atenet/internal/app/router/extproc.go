@@ -136,7 +136,9 @@ func (s *ExtProcServer) handleRequestHeaders(
 	}
 
 	slog.InfoContext(ctx, "ResumeActor", slog.String("actorID", actorID))
-	actor, err := s.resumer.ResumeActor(ctx, actorID)
+	// Forward the caller's JWT (if the request carries one) so the apiserver
+	// can authenticate the resume on the caller's behalf.
+	actor, err := s.resumer.ResumeActor(ctx, actorID, metadata.bearerToken())
 
 	slog.InfoContext(ctx, "ResumeActor result",
 		slog.String("actor", fmt.Sprintf("%+v", actor)),

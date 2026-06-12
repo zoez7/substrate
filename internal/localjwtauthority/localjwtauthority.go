@@ -20,7 +20,9 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 )
@@ -96,6 +98,93 @@ func Unmarshal(wireBytes []byte) (*Pool, error) {
 	}
 
 	return pool, nil
+}
+
+type jwk struct {
+	KeyType   string `json:"kty"`
+	KeyID     string `json:"kid"`
+	Use       string `json:"use"`
+	Algorithm string `json:"alg"`
+
+	EllipticCurve string `json:"crv,omitempty"`
+	EllipticX     string `json:"x,omitempty"`
+	EllipticY     string `json:"y,omitempty"`
+
+	RSAN string `json:"n,omitempty"`
+	RSAE string `json:"e,omitempty"`
+}
+
+type jwkSet struct {
+	Keys []jwk `json:"keys"`
+}
+
+// MarshalJWKS serializes the public halves of the pool's signing keys as an
+// RFC 7517 JWK Set, suitable for serving from an OIDC issuer's JWKS endpoint.
+// Each key's `kid` is the authority's ID, matching the `kid` header that
+// sessionidjwt.Sign places on minted tokens.
+func MarshalJWKS(pool *Pool) ([]byte, error) {
+	set := jwkSet{Keys: []jwk{}}
+	for _, authority := range pool.Authorities {
+		signer, ok := authority.SigningKey.(crypto.Signer)
+		if !ok {
+			return nil, fmt.Errorf("authority %q signing key does not expose a public key", authority.ID)
+		}
+
+		key := jwk{
+			KeyID:     authority.ID,
+			Use:       "sig",
+			Algorithm: authority.Algorithm,
+		}
+		switch pub := signer.Public().(type) {
+		case *ecdsa.PublicKey:
+			var curveName string
+			switch pub.Curve {
+			case elliptic.P256():
+				curveName = "P-256"
+			case elliptic.P384():
+				curveName = "P-384"
+			case elliptic.P521():
+				curveName = "P-521"
+			default:
+				return nil, fmt.Errorf("authority %q uses unhandled elliptic curve", authority.ID)
+			}
+			// Bytes returns the uncompressed point: 0x04 || X || Y, each
+			// coordinate fixed-width.
+			raw, err := pub.Bytes()
+			if err != nil {
+				return nil, fmt.Errorf("while encoding authority %q public key: %w", authority.ID, err)
+			}
+			byteLen := (pub.Curve.Params().BitSize + 7) / 8
+			if len(raw) != 1+2*byteLen || raw[0] != 4 {
+				return nil, fmt.Errorf("authority %q public key has unexpected encoding", authority.ID)
+			}
+
+			key.KeyType = "EC"
+			key.EllipticCurve = curveName
+			key.EllipticX = base64.RawURLEncoding.EncodeToString(raw[1 : 1+byteLen])
+			key.EllipticY = base64.RawURLEncoding.EncodeToString(raw[1+byteLen:])
+
+		case *rsa.PublicKey:
+			e := []byte{byte(pub.E >> 16), byte(pub.E >> 8), byte(pub.E)}
+			for len(e) > 1 && e[0] == 0 {
+				e = e[1:]
+			}
+			key.KeyType = "RSA"
+			key.RSAN = base64.RawURLEncoding.EncodeToString(pub.N.Bytes())
+			key.RSAE = base64.RawURLEncoding.EncodeToString(e)
+
+		default:
+			return nil, fmt.Errorf("authority %q uses unhandled key type %T", authority.ID, pub)
+		}
+
+		set.Keys = append(set.Keys, key)
+	}
+
+	wireBytes, err := json.Marshal(set)
+	if err != nil {
+		return nil, fmt.Errorf("while marshaling JWK set: %w", err)
+	}
+	return wireBytes, nil
 }
 
 // GenerateECDSAP256Authority generates an ECDSA P256 JWT signing key.

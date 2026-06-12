@@ -24,6 +24,8 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// Maybe we start with some stupid thing like {"<unique identifier of ate system component>": "Can resume"}
+// But that requires a full request / dependency graph: i.e which Ate-system component needs to call which?
 func (s *Service) ResumeActor(ctx context.Context, req *ateapipb.ResumeActorRequest) (*ateapipb.ResumeActorResponse, error) {
 	if err := validateResumeActorRequest(req); err != nil {
 		return nil, err

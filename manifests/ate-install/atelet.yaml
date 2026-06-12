@@ -102,6 +102,7 @@ spec:
           containerPort: 9090
           hostPort: 9090
           protocol: TCP
+        # Connection to ateom gvisor UDS.
         volumeMounts:
         - name: run-ateom
           mountPath: /var/lib/ateom-gvisor

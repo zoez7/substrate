@@ -18,17 +18,22 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"time"
 
+	"github.com/agent-substrate/substrate/cmd/ateapi/internal/authn"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/controlapi"
+	"github.com/agent-substrate/substrate/cmd/ateapi/internal/oidcprovider"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/sessionidentity"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store/ateredis"
 	"github.com/agent-substrate/substrate/internal/ateinterceptors"
 	"github.com/agent-substrate/substrate/internal/credbundle"
+	"github.com/agent-substrate/substrate/internal/oidcjwt"
 	"github.com/agent-substrate/substrate/internal/serverboot"
 	"github.com/agent-substrate/substrate/internal/version"
 	"github.com/agent-substrate/substrate/pkg/client/clientset/versioned"
@@ -57,12 +62,16 @@ var (
 	redisTLSServerName  = pflag.String("redis-tls-server-name", "", "The ServerName to use for Redis TLS hostname verification.")
 	redisClientCert     = pflag.String("redis-client-cert", "", "The file containing client TLS certificate/key credential bundle for Redis/Valkey.")
 
-	clientJWTIssuer      = pflag.String("client-jwt-issuer", "", "The expected issuer URL for client JWTs.")
-	clientJWTAudience    = pflag.String("client-jwt-audience", "", "The expected audience for client JWTs.")
 	sessionIDJWTPoolFile = pflag.String("session-id-jwt-pool", "", "The file that contains the serialized JWT authority pool for signing session JWTs")
+	sessionJWTIssuer     = pflag.String("session-jwt-issuer", "", "The issuer URL stamped on minted session JWTs and served by the OIDC issuer endpoints (e.g. https://broker.ate-system.svc). Empty disables the OIDC issuer listener.")
+	oidcIssuerListenAddr = pflag.String("oidc-issuer-listen-addr", ":8443", "Address and port the OIDC issuer HTTPS server (discovery document and JWKS) should listen on.")
 
 	sessionIDCAPoolFile = pflag.String("session-id-ca-pool", "", "The file that contains the CA pool for signing session JWTs")
 	workerpoolCACerts   = pflag.String("workerpool-ca-certs", "", "The file that contains the CA for verifying workerpool client certificates.")
+	serviceDNSCACerts   = pflag.String("service-dns-ca-certs", "", "The file that contains the service-dns CA trust bundle for identifying system client certificates.")
+	systemDNSNames      = pflag.StringSlice("system-dns-names", nil, "The allowlist of DNS SANs accepted for system client certificates. Certificates that chain to the service-dns CA but carry no DNS SAN in this list are treated as unauthenticated.")
+	oidcConfigsFile     = pflag.String("oidc-configs", "", "The file that contains the trusted OIDC issuer configurations for verifying JWTs. Tokens from issuers not in this file are rejected.")
+	trustedForwarders   = pflag.StringSlice("trusted-jwt-forwarders", nil, "The allowlist of system identities (DNS SANs) allowed to assert forwarded actor JWTs. Forwarded JWTs from any other peer are rejected. Empty means no forwarded JWT is ever honored.")
 
 	showVersion = pflag.Bool("version", false, "Print version and exit.")
 )
@@ -104,10 +113,25 @@ func main() {
 		serverboot.Fatal(ctx, "Failed to create Kubernetes clients", err)
 	}
 
-	serverCreds, err := buildServerCreds(ctx)
+	systemRoots, clientCAs, err := buildClientCAs(ctx)
 	if err != nil {
-		serverboot.Fatal(ctx, "Failed to build server credentials", err)
+		serverboot.Fatal(ctx, "Failed to build client CA pools", err)
 	}
+	serverCreds := credentials.NewTLS(&tls.Config{
+		GetCertificate: credbundle.Loader(*grpcServerCredBundle),
+		ClientAuth:     tls.VerifyClientCertIfGiven,
+		ClientCAs:      clientCAs,
+	})
+	verifier, err := buildJWTVerifier(ctx)
+	if err != nil {
+		serverboot.Fatal(ctx, "Failed to build JWT verifier", err)
+	}
+	authenticator := authn.New(authn.Config{
+		SystemRoots:       systemRoots,
+		SystemNames:       *systemDNSNames,
+		TrustedForwarders: *trustedForwarders,
+		Verifier:          verifier,
+	})
 
 	redisPersistence := ateredis.NewPersistence(redisClient)
 
@@ -133,7 +157,26 @@ func main() {
 	dialer := controlapi.NewAteletDialer(workerPodInformer.GetIndexer(), ateletPodInformer.GetIndexer())
 	sm := controlapi.NewService(redisPersistence, actorTemplateLister, dialer, clientset)
 
-	sessionIdentitySrv := sessionidentity.New(*clientJWTIssuer, *clientJWTAudience, *sessionIDJWTPoolFile, *sessionIDCAPoolFile, *workerpoolCACerts)
+	sessionIdentitySrv := sessionidentity.New(*sessionJWTIssuer, *sessionIDJWTPoolFile, *sessionIDCAPoolFile, *workerpoolCACerts)
+
+	// Serve the OIDC discovery document and JWKS that let relying parties
+	// verify the session JWTs minted from the session-id JWT pool.
+	if *sessionJWTIssuer != "" {
+		oidcSrv := &http.Server{
+			Addr:    *oidcIssuerListenAddr,
+			Handler: oidcprovider.New(*sessionJWTIssuer, *sessionIDJWTPoolFile).Handler(),
+			TLSConfig: &tls.Config{
+				GetCertificate: credbundle.Loader(*grpcServerCredBundle),
+				MinVersion:     tls.VersionTLS12,
+			},
+		}
+		go func() {
+			if err := oidcSrv.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				serverboot.Fatal(ctx, "Failed to serve OIDC issuer endpoints", err)
+			}
+		}()
+		slog.InfoContext(ctx, "Serving OIDC issuer endpoints", slog.String("issuer", *sessionJWTIssuer), slog.String("addr", *oidcIssuerListenAddr))
+	}
 
 	lisCfg := &net.ListenConfig{}
 	lis, err := lisCfg.Listen(ctx, "tcp", *listenAddr)
@@ -141,10 +184,16 @@ func main() {
 		serverboot.Fatal(ctx, "Failed to start listener", err)
 	}
 
+	// Should we have 2 differnt endpoints. One is gRPC server for exchanging
+	// per-actor certificates with workers and the other one is gRPC server
+	// for ate-system.
 	mux := grpc.NewServer(
 		grpc.Creds(serverCreds),
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
-		grpc.UnaryInterceptor(ateinterceptors.ServerUnaryInterceptor),
+		// Authenticate first so the principal is in context for logging and handlers.
+		grpc.ChainUnaryInterceptor(authenticator.UnaryServerInterceptor, ateinterceptors.ServerUnaryInterceptor),
+		grpc.ChainStreamInterceptor(authenticator.StreamServerInterceptor),
+		// Add a simple interceptor or authorization.
 	)
 	reflection.Register(mux)
 	ateapipb.RegisterControlServer(mux, sm)
@@ -170,8 +219,8 @@ func loadFlagsFromEnv() {
 		env  string
 	}{
 		{redisClusterAddress, "ATE_API_REDIS_ADDRESS"},
-		{clientJWTIssuer, "ATE_API_K8SJWT_ISSUER"},
 		{redisUseIAMAuth, "ATE_API_REDIS_USE_IAM_AUTH"},
+		// Do we still need this since we are not using remote redis?
 		{redisTLSServerName, "ATE_API_REDIS_TLS_SERVER_NAME"},
 		{redisClientCert, "ATE_API_REDIS_CLIENT_CERT"},
 	}
@@ -191,11 +240,15 @@ func logFlagValues(ctx context.Context) {
 		slog.String("redis-use-iam-auth", *redisUseIAMAuth),
 		slog.String("redis-tls-server-name", *redisTLSServerName),
 		slog.String("redis-client-cert", *redisClientCert),
-		slog.String("client-jwt-issuer", *clientJWTIssuer),
-		slog.String("client-jwt-audience", *clientJWTAudience),
+		slog.String("session-jwt-issuer", *sessionJWTIssuer),
+		slog.String("oidc-issuer-listen-addr", *oidcIssuerListenAddr),
 		slog.String("session-id-jwt-pool", *sessionIDJWTPoolFile),
 		slog.String("session-id-ca-pool", *sessionIDCAPoolFile),
 		slog.String("workerpool-ca-certs", *workerpoolCACerts),
+		slog.String("service-dns-ca-certs", *serviceDNSCACerts),
+		slog.Any("system-dns-names", *systemDNSNames),
+		slog.String("oidc-configs", *oidcConfigsFile),
+		slog.Any("trusted-jwt-forwarders", *trustedForwarders),
 	)
 }
 
@@ -302,26 +355,101 @@ func newKubeClients() (*kubernetes.Clientset, versioned.Interface, error) {
 	return clientset, ateClient, nil
 }
 
-// buildServerCreds loads the workerpool CA pool (if configured) and
-// composes gRPC TransportCredentials over the server bundle + optional
-// client-cert verification.
-func buildServerCreds(ctx context.Context) (credentials.TransportCredentials, error) {
-	var clientCAs *x509.CertPool
+// buildClientCAs loads the CA pools used to verify and classify client
+// certificates. It returns the system roots (service-dns CA trust bundle)
+// and the combined ClientCAs set used for the mTLS handshake. ClientCAs is
+// the union of the session-id, system, and workerpool roots so that all
+// three certificate types pass the handshake and reach the authentication
+// interceptor; any of the three may be empty. Only system certificates are
+// classified into a principal: session-id and workerpool certificates are
+// accepted at the TLS layer for data-plane use but carry no principal here.
+func buildClientCAs(ctx context.Context) (systemRoots, clientCAs *x509.CertPool, err error) {
+	// TODO: Periodically reload these to handle rotations. Consult with Tina to see how she did it for client-go.
+	clientCAs = x509.NewCertPool()
+
+	// Session certificates (MintCert) are accepted at the TLS layer but are
+	// not classified: all actor identities arrive as router-forwarded JWTs.
+	// I commented this out because I don't think actors will talk to ate-apiserver directly via mTLS. It will always be proxyed.
+	// if *sessionIDCAPoolFile != "" {
+	// 	poolBytes, err := os.ReadFile(*sessionIDCAPoolFile)
+	// 	if err != nil {
+	// 		return nil, nil, fmt.Errorf("read session-id CA pool: %w", err)
+	// 	}
+	// 	pool, err := localca.Unmarshal(poolBytes)
+	// 	if err != nil {
+	// 		return nil, nil, fmt.Errorf("parse session-id CA pool: %w", err)
+	// 	}
+	// 	for _, ca := range pool.CAs {
+	// 		clientCAs.AddCert(ca.RootCertificate)
+	// 	}
+	// 	slog.InfoContext(ctx, "Accepting session-id CA pool client certificates", slog.String("path", *sessionIDCAPoolFile))
+	// }
+
+	// System identities: certificates signed by the service-dns CA pool.
+	if *serviceDNSCACerts != "" {
+		ca, err := os.ReadFile(*serviceDNSCACerts)
+		if err != nil {
+			return nil, nil, fmt.Errorf("read service-dns CA certs: %w", err)
+		}
+		systemRoots = x509.NewCertPool()
+		if !systemRoots.AppendCertsFromPEM(ca) {
+			return nil, nil, fmt.Errorf("parse service-dns CA certs from %s", *serviceDNSCACerts)
+		}
+		clientCAs.AppendCertsFromPEM(ca)
+		slog.InfoContext(ctx, "Using service-dns CA for system clients", slog.String("path", *serviceDNSCACerts))
+	}
+
 	if *workerpoolCACerts != "" {
-		// TODO: Periodically reload these to handle rotations. Consult with Tina to see how she did it for client-go.
 		ca, err := os.ReadFile(*workerpoolCACerts)
 		if err != nil {
-			return nil, fmt.Errorf("read workerpool CA: %w", err)
+			return nil, nil, fmt.Errorf("read workerpool CA: %w", err)
 		}
-		clientCAs = x509.NewCertPool()
 		if !clientCAs.AppendCertsFromPEM(ca) {
-			return nil, fmt.Errorf("parse workerpool CA from %s", *workerpoolCACerts)
+			return nil, nil, fmt.Errorf("parse workerpool CA from %s", *workerpoolCACerts)
 		}
 		slog.InfoContext(ctx, "Using custom CA for workerpool clients", slog.String("path", *workerpoolCACerts))
 	}
-	return credentials.NewTLS(&tls.Config{
-		GetCertificate: credbundle.Loader(*grpcServerCredBundle),
-		ClientAuth:     tls.VerifyClientCertIfGiven,
-		ClientCAs:      clientCAs,
-	}), nil
+
+	return systemRoots, clientCAs, nil
+}
+
+// buildJWTVerifier loads the OIDC issuer configurations and builds the JWT
+// verifier for the authentication interceptor. The verifier's HTTPS fetches
+// trust the system roots plus the service-dns CA bundle, so it can reach
+// both public issuers (e.g. a managed Kubernetes cluster issuer) and
+// in-cluster issuers serving servicedns certificates (the session-id
+// broker). With no config file, the verifier trusts no issuers and rejects
+// every token (fail closed).
+func buildJWTVerifier(ctx context.Context) (*oidcjwt.Verifier, error) {
+	cfg := &oidcjwt.Config{}
+	if *oidcConfigsFile != "" {
+		cfgBytes, err := os.ReadFile(*oidcConfigsFile)
+		if err != nil {
+			return nil, fmt.Errorf("read OIDC configs: %w", err)
+		}
+		cfg, err = oidcjwt.Unmarshal(cfgBytes)
+		if err != nil {
+			return nil, fmt.Errorf("parse OIDC configs from %s: %w", *oidcConfigsFile, err)
+		}
+		for _, issuer := range cfg.Issuers {
+			slog.InfoContext(ctx, "Trusting OIDC issuer", slog.String("issuer", issuer.Issuer), slog.String("kind", issuer.Kind))
+		}
+	}
+
+	fetchRoots, err := x509.SystemCertPool()
+	if err != nil {
+		slog.WarnContext(ctx, "Failed to load system cert pool for issuer fetches", slog.Any("err", err))
+		fetchRoots = x509.NewCertPool()
+	}
+	if *serviceDNSCACerts != "" {
+		ca, err := os.ReadFile(*serviceDNSCACerts)
+		if err != nil {
+			return nil, fmt.Errorf("read service-dns CA certs: %w", err)
+		}
+		if !fetchRoots.AppendCertsFromPEM(ca) {
+			return nil, fmt.Errorf("parse service-dns CA certs from %s", *serviceDNSCACerts)
+		}
+	}
+
+	return oidcjwt.NewVerifier(cfg, oidcjwt.Options{RootCAs: fetchRoots}), nil
 }

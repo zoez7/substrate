@@ -101,7 +101,8 @@ func do(ctx context.Context) error {
 	go reap.ReapChildren(nil, nil, nil, &reapLock)
 	slog.InfoContext(ctx, "Child process reaper launched")
 
-	// Clean up any old socket.
+	// Clean up any old socket. Unix Domain Socket file that ateom-gvisor listens to for incoming gRPC connections.
+	// How to secure connections to that one?
 	sockPath := ateompath.AteomSocketPath(*podUID)
 	if err := os.RemoveAll(sockPath); err != nil {
 		return fmt.Errorf("while removing %q: %w", sockPath, err)
@@ -154,7 +155,7 @@ func do(ctx context.Context) error {
 	return nil
 }
 
-// AteomService is a service for shepherding single microvm.
+// AteomService is a service for shepherding single Actor (either gVisor or microVM).
 type AteomService struct {
 	ateompb.UnimplementedAteomServer
 

@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<!--
+ Copyright 2026 Google LLC
+
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Agent Substrate — Life of a Request</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --panel-2: #1c2330;
+    --line: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --dataplane: #3fb950;   /* green: request/data path */
+    --control: #58a6ff;     /* blue: control plane */
+    --storage: #d29922;     /* amber: object storage */
+    --node: #bc8cff;        /* purple: node / pod runtime */
+    --bg-infra: #6e7681;    /* grey: background infra */
+    --hot: #f78166;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  header {
+    padding: 24px 28px 8px;
+    border-bottom: 1px solid var(--line);
+  }
+  h1 { margin: 0; font-size: 22px; letter-spacing: .2px; }
+  header p { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
+  .wrap { display: flex; gap: 0; min-height: calc(100vh - 86px); }
+  .stage { flex: 1; padding: 20px 16px 40px; overflow: auto; }
+  .side {
+    width: 380px; min-width: 380px;
+    border-left: 1px solid var(--line);
+    background: var(--panel);
+    padding: 20px;
+    display: flex; flex-direction: column;
+  }
+  /* SVG diagram */
+  svg { width: 100%; height: auto; display: block; }
+  .nodebox { transition: opacity .25s, filter .25s; }
+  .nodebox rect { rx: 10; }
+  .node-label { font-size: 13px; font-weight: 600; fill: var(--text); }
+  .node-sub { font-size: 10.5px; fill: var(--muted); }
+  .edge { stroke-width: 2.2; fill: none; opacity: .28; transition: opacity .25s, stroke-width .25s; marker-end: url(#arrow); }
+  .edge.dim { opacity: .10; }
+  .edge.active { opacity: 1; stroke-width: 3.4; marker-end: url(#arrow-hot); filter: drop-shadow(0 0 5px var(--hot)); }
+  .edge-num {
+    font-size: 11px; font-weight: 700; fill: var(--bg);
+    text-anchor: middle; dominant-baseline: central;
+  }
+  .edge-num-bg { fill: var(--muted); transition: fill .25s; }
+  .edge.active ~ .edge-num-bg, .numbg.active { fill: var(--hot); }
+  .faded { opacity: .25; }
+  .pulse { filter: drop-shadow(0 0 8px currentColor); }
+
+  /* controls */
+  .controls { display: flex; gap: 8px; margin-bottom: 16px; }
+  button {
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 8px;
+    padding: 8px 14px; font-size: 13px; cursor: pointer;
+    transition: background .15s, border-color .15s;
+  }
+  button:hover { background: #283041; border-color: #3d4759; }
+  button.primary { background: var(--control); color: #06223f; border-color: var(--control); font-weight: 600; }
+  button:disabled { opacity: .4; cursor: default; }
+
+  .step-counter { font-size: 12px; color: var(--muted); margin-bottom: 8px; letter-spacing: .3px; }
+  .step-title { font-size: 16px; font-weight: 700; margin: 0 0 8px; }
+  .step-flow { font-size: 12.5px; color: var(--hot); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin-bottom: 12px; }
+  .step-desc { font-size: 13.5px; line-height: 1.55; color: #c9d1d9; }
+  .step-desc code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; font-size: 12px; color: #ffd9a0; }
+
+  .steplist { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 12px; overflow:auto; }
+  .steplist ol { margin: 0; padding-left: 0; list-style: none; counter-reset: s; }
+  .steplist li {
+    counter-increment: s; padding: 7px 10px 7px 34px; position: relative;
+    font-size: 12.5px; color: var(--muted); border-radius: 6px; cursor: pointer;
+    transition: background .15s, color .15s;
+  }
+  .steplist li::before {
+    content: counter(s); position: absolute; left: 8px; top: 50%; transform: translateY(-50%);
+    width: 18px; height: 18px; border-radius: 50%; background: var(--panel-2);
+    color: var(--muted); font-size: 10px; font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .steplist li:hover { background: var(--panel-2); color: var(--text); }
+  .steplist li.on { background: #21262d; color: var(--text); }
+  .steplist li.on::before { background: var(--hot); color: var(--bg); }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 12px 18px; padding: 14px 28px; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--muted); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .dot { width: 11px; height: 11px; border-radius: 3px; display: inline-block; }
+  .footnote { font-size: 11.5px; color: var(--muted); margin-top: 14px; line-height:1.5; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Agent Substrate — Life of a Request</h1>
+  <p>How an inbound request to a suspended actor flows through the system, triggering an on-demand resume and getting routed to its worker pod.</p>
+</header>
+
+<div class="legend">
+  <span><i class="dot" style="background:var(--dataplane)"></i> Data plane (request path)</span>
+  <span><i class="dot" style="background:var(--control)"></i> Control plane (gRPC)</span>
+  <span><i class="dot" style="background:var(--node)"></i> Node / pod runtime</span>
+  <span><i class="dot" style="background:var(--storage)"></i> Object storage</span>
+  <span><i class="dot" style="background:var(--bg-infra)"></i> Background infra</span>
+</div>
+
+<div class="wrap">
+  <div class="stage">
+    <svg id="diagram" viewBox="0 0 900 620" role="img" aria-label="Substrate request flow diagram">
+      <defs>
+        <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--muted)"/>
+        </marker>
+        <marker id="arrow-hot" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--hot)"/>
+        </marker>
+      </defs>
+
+      <!-- ============ EDGES (drawn first, under boxes) ============ -->
+      <!-- 1 client -> dns -->
+      <path id="e1" class="edge" d="M120,70 L120,120" stroke="var(--dataplane)"/>
+      <!-- 2 dns -> client (answer) : draw as small loop, but keep simple: dns->router conceptually; we route client->router -->
+      <!-- 2 client -> router -->
+      <path id="e2" class="edge" d="M150,55 C420,40 470,40 470,118" stroke="var(--dataplane)"/>
+      <!-- 3 router(extproc) -> ateapi ResumeActor -->
+      <path id="e3" class="edge" d="M470,200 L470,255" stroke="var(--control)"/>
+      <!-- 4 ateapi <-> valkey -->
+      <path id="e4" class="edge" d="M560,290 L690,290" stroke="var(--control)"/>
+      <!-- 5 ateapi -> atelet Restore -->
+      <path id="e5" class="edge" d="M455,335 C300,370 240,370 215,398" stroke="var(--control)"/>
+      <!-- 6 atelet <- GCS download snapshot -->
+      <path id="e6" class="edge" d="M150,470 L150,540" stroke="var(--storage)"/>
+      <!-- 7 atelet -> ateom RestoreWorkload -->
+      <path id="e7" class="edge" d="M250,440 L350,440" stroke="var(--node)"/>
+      <!-- 8 ateom -> runsc workload (within pod) -->
+      <path id="e8" class="edge" d="M430,470 L430,532" stroke="var(--node)"/>
+      <!-- 9 ateapi -> router (return actor + pod ip) -->
+      <path id="e9" class="edge" d="M490,255 L490,200" stroke="var(--control)"/>
+      <!-- 10 router/envoy -> worker pod (forward request) -->
+      <path id="e10" class="edge" d="M540,170 C690,200 560,470 470,532" stroke="var(--dataplane)"/>
+
+      <!-- ============ NODES ============ -->
+      <!-- Client -->
+      <g class="nodebox" id="n-client">
+        <rect x="60" y="20" width="120" height="40" rx="10" fill="var(--panel-2)" stroke="var(--dataplane)"/>
+        <text class="node-label" x="120" y="37" text-anchor="middle">Client</text>
+        <text class="node-sub" x="120" y="51" text-anchor="middle">HTTP → actor-id.host</text>
+      </g>
+
+      <!-- atenet dns -->
+      <g class="nodebox" id="n-dns">
+        <rect x="60" y="120" width="120" height="46" rx="10" fill="var(--panel-2)" stroke="var(--dataplane)"/>
+        <text class="node-label" x="120" y="140" text-anchor="middle">atenet dns</text>
+        <text class="node-sub" x="120" y="155" text-anchor="middle">resolve actor name</text>
+      </g>
+
+      <!-- atenet router (Envoy + ext_proc) -->
+      <g class="nodebox" id="n-router">
+        <rect x="360" y="118" width="220" height="80" rx="10" fill="var(--panel-2)" stroke="var(--dataplane)"/>
+        <text class="node-label" x="470" y="142" text-anchor="middle">atenet router</text>
+        <text class="node-sub" x="470" y="160" text-anchor="middle">Envoy data plane + ext_proc</text>
+        <text class="node-sub" x="470" y="176" text-anchor="middle">parse actorID from Host header</text>
+        <text class="node-sub" x="470" y="190" text-anchor="middle">ActorResumer (singleflight)</text>
+      </g>
+
+      <!-- ateapi -->
+      <g class="nodebox" id="n-ateapi">
+        <rect x="380" y="255" width="180" height="80" rx="10" fill="var(--panel-2)" stroke="var(--control)"/>
+        <text class="node-label" x="470" y="280" text-anchor="middle">ateapi</text>
+        <text class="node-sub" x="470" y="298" text-anchor="middle">control plane (gRPC)</text>
+        <text class="node-sub" x="470" y="313" text-anchor="middle">ResumeActor · rendezvous</text>
+        <text class="node-sub" x="470" y="327" text-anchor="middle">scheduling</text>
+      </g>
+
+      <!-- ValKey/Redis -->
+      <g class="nodebox" id="n-valkey">
+        <rect x="690" y="262" width="150" height="56" rx="10" fill="var(--panel-2)" stroke="var(--control)"/>
+        <text class="node-label" x="765" y="285" text-anchor="middle">ValKey / Redis</text>
+        <text class="node-sub" x="765" y="301" text-anchor="middle">Actor + Worker state</text>
+      </g>
+
+      <!-- atelet -->
+      <g class="nodebox" id="n-atelet">
+        <rect x="80" y="398" width="170" height="72" rx="10" fill="var(--panel-2)" stroke="var(--node)"/>
+        <text class="node-label" x="165" y="421" text-anchor="middle">atelet</text>
+        <text class="node-sub" x="165" y="438" text-anchor="middle">node DaemonSet</text>
+        <text class="node-sub" x="165" y="452" text-anchor="middle">fetch runsc · OCI bundle</text>
+        <text class="node-sub" x="165" y="465" text-anchor="middle">stream snapshot ⇄ storage</text>
+      </g>
+
+      <!-- Object storage -->
+      <g class="nodebox" id="n-gcs">
+        <rect x="80" y="540" width="140" height="50" rx="10" fill="var(--panel-2)" stroke="var(--storage)"/>
+        <text class="node-label" x="150" y="562" text-anchor="middle">GCS / S3</text>
+        <text class="node-sub" x="150" y="578" text-anchor="middle">checkpoint.img (zstd)</text>
+      </g>
+
+      <!-- Worker Pod containing ateom + workload -->
+      <g class="nodebox" id="n-pod">
+        <rect x="340" y="398" width="240" height="190" rx="12" fill="#11161f" stroke="var(--node)" stroke-dasharray="5 4"/>
+        <text class="node-sub" x="460" y="414" text-anchor="middle" style="fill:var(--node);font-weight:700">worker Pod</text>
+
+        <g id="n-ateom">
+          <rect x="358" y="424" width="150" height="46" rx="9" fill="var(--panel-2)" stroke="var(--node)"/>
+          <text class="node-label" x="433" y="444" text-anchor="middle">ateom-gvisor</text>
+          <text class="node-sub" x="433" y="459" text-anchor="middle">runsc create/restore</text>
+        </g>
+
+        <g id="n-workload">
+          <rect x="358" y="532" width="220" height="46" rx="9" fill="var(--panel-2)" stroke="var(--dataplane)"/>
+          <text class="node-label" x="468" y="552" text-anchor="middle">actor workload</text>
+          <text class="node-sub" x="468" y="567" text-anchor="middle">gVisor sandbox · listens :80</text>
+        </g>
+      </g>
+
+      <!-- ============ EDGE NUMBER BADGES ============ -->
+      <g id="badges" font-family="ui-monospace, Menlo, monospace">
+        <g data-step="0"><circle class="numbg" cx="120" cy="95" r="9"/><text class="edge-num" x="120" y="95">1</text></g>
+        <g data-step="1"><circle class="numbg" cx="300" cy="44" r="9"/><text class="edge-num" x="300" y="44">2</text></g>
+        <g data-step="2"><circle class="numbg" cx="470" cy="228" r="9"/><text class="edge-num" x="470" y="228">3</text></g>
+        <g data-step="3"><circle class="numbg" cx="625" cy="290" r="9"/><text class="edge-num" x="625" y="290">4</text></g>
+        <g data-step="4"><circle class="numbg" cx="320" cy="372" r="9"/><text class="edge-num" x="320" y="372">5</text></g>
+        <g data-step="5"><circle class="numbg" cx="150" cy="505" r="9"/><text class="edge-num" x="150" y="505">6</text></g>
+        <g data-step="6"><circle class="numbg" cx="300" cy="440" r="9"/><text class="edge-num" x="300" y="440">7</text></g>
+        <g data-step="7"><circle class="numbg" cx="430" cy="501" r="9"/><text class="edge-num" x="430" y="501">8</text></g>
+        <g data-step="8"><circle class="numbg" cx="503" cy="228" r="9"/><text class="edge-num" x="503" y="228">9</text></g>
+        <g data-step="9"><circle class="numbg" cx="640" cy="350" r="9"/><text class="edge-num" x="640" y="350">10</text></g>
+      </g>
+    </svg>
+
+    <p class="footnote">
+      <b>Background (not on the hot path):</b> <span style="color:var(--bg-infra)">atecontroller</span> reconciles the
+      <code>WorkerPool</code> / <code>ActorTemplate</code> CRDs and provisions the pool of worker Pods that ateom runs in;
+      <span style="color:var(--bg-infra)">podcertcontroller</span> issues each pod's TLS certificate.
+      The reverse path — <b>SuspendActor</b> — runs ateapi → atelet <code>Checkpoint</code> → ateom <code>CheckpointWorkload</code>
+      (<code>runsc checkpoint</code>), then atelet uploads the snapshot to GCS/S3 and reclaims the worker.
+    </p>
+  </div>
+
+  <div class="side">
+    <div class="controls">
+      <button id="prev">‹ Prev</button>
+      <button id="play" class="primary">▶ Play</button>
+      <button id="next">Next ›</button>
+    </div>
+    <div class="step-counter" id="counter">Step 1 / 10</div>
+    <div class="step-title" id="title"></div>
+    <div class="step-flow" id="flow"></div>
+    <div class="step-desc" id="desc"></div>
+
+    <div class="steplist">
+      <ol id="steplist"></ol>
+    </div>
+  </div>
+</div>
+
+<script>
+const STEPS = [
+  {
+    edge: "e1",
+    nodes: ["n-client", "n-dns"],
+    title: "DNS resolution",
+    flow: "Client → atenet dns",
+    desc: "The client wants to reach an actor addressed as <code>&lt;actor-id&gt;.&lt;suffix&gt;</code>. <b>atenet dns</b> resolves the name so the request can be sent toward the router's Envoy front end."
+  },
+  {
+    edge: "e2",
+    nodes: ["n-client", "n-router"],
+    title: "Request hits the router",
+    flow: "Client → atenet router (Envoy)",
+    desc: "The HTTP request lands on the <b>atenet router</b>, where an Envoy data plane fronts the cluster. Envoy invokes its <b>ext_proc</b> callout (the router's gRPC service) on the request headers before routing."
+  },
+  {
+    edge: "e3",
+    nodes: ["n-router", "n-ateapi"],
+    title: "Extract actor ID & resume",
+    flow: "router.ext_proc → ateapi.ResumeActor",
+    desc: "ext_proc parses the actor ID from the <code>Host</code> / <code>:authority</code> header (<code>parseActorID</code>). The <b>ActorResumer</b> calls <code>ateapi.ResumeActor</code>, deduplicating concurrent requests for the same actor via <code>singleflight</code> and retrying on <code>Aborted</code>."
+  },
+  {
+    edge: "e4",
+    nodes: ["n-ateapi", "n-valkey"],
+    title: "Look up & schedule",
+    flow: "ateapi ⇄ ValKey/Redis",
+    desc: "<b>ateapi</b> reads the actor's state and the worker fleet from <b>ValKey/Redis</b>. If the actor is suspended, it picks a worker using <b>rendezvous hashing</b> and records the assignment — all high-frequency state lives here, off the Kubernetes control plane."
+  },
+  {
+    edge: "e5",
+    nodes: ["n-ateapi", "n-atelet"],
+    title: "Tell the node to restore",
+    flow: "ateapi → atelet.Restore",
+    desc: "ateapi calls <code>AteomHerder.Restore</code> on the <b>atelet</b> DaemonSet running on the chosen worker's node, passing the runsc version, workload spec, and the snapshot's object-storage URI prefix."
+  },
+  {
+    edge: "e6",
+    nodes: ["n-atelet", "n-gcs"],
+    title: "Pull the snapshot",
+    flow: "atelet ← GCS/S3",
+    desc: "<b>atelet</b> fetches the pinned runsc binary, prepares the OCI bundle, and downloads the snapshot (<code>checkpoint.img</code> / <code>pages.img</code>, zstd-compressed) from <b>GCS/S3</b> to a local path. atelet — not ateom — owns all object-storage I/O."
+  },
+  {
+    edge: "e7",
+    nodes: ["n-atelet", "n-ateom"],
+    title: "Hand off to the pod runtime",
+    flow: "atelet → ateom.RestoreWorkload",
+    desc: "atelet calls <code>Ateom.RestoreWorkload</code> on <b>ateom-gvisor</b> inside the worker Pod, pointing it at the local snapshot and runsc path."
+  },
+  {
+    edge: "e8",
+    nodes: ["n-ateom", "n-workload"],
+    title: "runsc restore",
+    flow: "ateom → runsc create + restore",
+    desc: "<b>ateom-gvisor</b> runs <code>runsc create</code> + <code>runsc restore</code>, rehydrating the gVisor sandbox from the checkpoint. The <b>actor workload</b> is now running and listening on port 80."
+  },
+  {
+    edge: "e9",
+    nodes: ["n-ateapi", "n-router"],
+    title: "Return the worker endpoint",
+    flow: "ateapi → router (Actor.ateom_pod_ip)",
+    desc: "ateapi returns the <code>Actor</code> to the router, including <code>ateom_pod_ip</code> — the IP of the now-running worker pod hosting this actor."
+  },
+  {
+    edge: "e10",
+    nodes: ["n-router", "n-workload"],
+    title: "Forward to the actor",
+    flow: "Envoy → worker pod :80",
+    desc: "The router sets the upstream to <code>workerIP:80</code> and Envoy forwards the held request to the actor workload. The response streams back to the client — total activation is sub-100ms because the whole path bypasses the Kubernetes control plane."
+  },
+];
+
+const $ = (id) => document.getElementById(id);
+const allEdges = [...document.querySelectorAll(".edge")];
+const allNodes = [...document.querySelectorAll(".nodebox")];
+const allBadges = [...document.querySelectorAll("#badges g")];
+let cur = 0, timer = null;
+
+function render(i) {
+  cur = i;
+  const s = STEPS[i];
+  // edges
+  allEdges.forEach(e => { e.classList.remove("active"); e.classList.add("dim"); });
+  const ae = $(s.edge);
+  if (ae) { ae.classList.add("active"); ae.classList.remove("dim"); }
+  // nodes
+  allNodes.forEach(n => n.classList.add("faded"));
+  s.nodes.forEach(id => { const n = $(id); if (n) n.classList.remove("faded"); });
+  // badges
+  allBadges.forEach(b => b.querySelector(".numbg").classList.remove("active"));
+  const bg = allBadges[i] && allBadges[i].querySelector(".numbg");
+  if (bg) bg.classList.add("active");
+  // text
+  $("counter").textContent = `Step ${i + 1} / ${STEPS.length}`;
+  $("title").textContent = s.title;
+  $("flow").textContent = s.flow;
+  $("desc").innerHTML = s.desc;
+  // step list
+  [...$("steplist").children].forEach((li, k) => li.classList.toggle("on", k === i));
+  $("prev").disabled = i === 0;
+  $("next").disabled = i === STEPS.length - 1;
+}
+
+function buildList() {
+  const ol = $("steplist");
+  STEPS.forEach((s, i) => {
+    const li = document.createElement("li");
+    li.textContent = s.title;
+    li.onclick = () => { stopPlay(); render(i); };
+    ol.appendChild(li);
+  });
+}
+
+function next() { if (cur < STEPS.length - 1) render(cur + 1); else stopPlay(); }
+function prev() { if (cur > 0) render(cur - 1); }
+function stopPlay() { if (timer) { clearInterval(timer); timer = null; $("play").textContent = "▶ Play"; } }
+function togglePlay() {
+  if (timer) { stopPlay(); return; }
+  if (cur === STEPS.length - 1) render(0);
+  $("play").textContent = "⏸ Pause";
+  timer = setInterval(() => { if (cur >= STEPS.length - 1) { stopPlay(); } else { next(); } }, 2200);
+}
+
+$("next").onclick = () => { stopPlay(); next(); };
+$("prev").onclick = () => { stopPlay(); prev(); };
+$("play").onclick = togglePlay;
+document.addEventListener("keydown", (e) => {
+  if (e.key === "ArrowRight") { stopPlay(); next(); }
+  else if (e.key === "ArrowLeft") { stopPlay(); prev(); }
+  else if (e.key === " ") { e.preventDefault(); togglePlay(); }
+});
+
+buildList();
+render(0);
+</script>
+</body>
+</html>

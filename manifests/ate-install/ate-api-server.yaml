@@ -83,12 +83,17 @@ spec:
           - --redis-use-iam-auth=@env
           - --redis-tls-server-name=@env
           - --redis-client-cert=@env
-          - --client-jwt-issuer=@env
-          - --client-jwt-audience=api.ate-system.svc
+          - --oidc-configs=/run/oidc-configs/configs.json
+          - --trusted-jwt-forwarders=atenet-router.ate-system.svc
+          - --system-dns-names=atenet-router.ate-system.svc
           - --session-id-jwt-pool=/run/session-id-jwt-pool/pool.json
           - --session-id-ca-pool=/run/session-id-ca-pool/pool.json
+          - --session-jwt-issuer=https://broker.ate-system.svc
+          - --oidc-issuer-listen-addr=0.0.0.0:8443
           - --workerpool-ca-certs=/run/workerpool-ca-certs/trust-bundle.pem
+          - --service-dns-ca-certs=/run/service-dns-ca-certs/trust-bundle.pem
         env:
+        # Env vars used by OpenTelemetry reporting.
         - name: POD_NAME
           valueFrom:
             fieldRef:
@@ -128,8 +133,19 @@ spec:
         - name: "workerpool-ca-certs"
           mountPath: "/run/workerpool-ca-certs"
           readOnly: true
+        - name: "service-dns-ca-certs"
+          mountPath: "/run/service-dns-ca-certs"
+          readOnly: true
+        # Note: See hack/install-ate.sh (create_oidc_configs_configmap) for
+        # how this ConfigMap is generated.
+        - name: "oidc-configs"
+          mountPath: "/run/oidc-configs"
+          readOnly: true
         ports:
         - containerPort: 443
+        # Serving the oidc discovery document.
+        - name: oidc-issuer
+          containerPort: 8443
         - name: prometheus
           containerPort: 9090
         readinessProbe:
@@ -143,6 +159,7 @@ spec:
         projected:
           sources:
           - podCertificate:
+              # TODO: use 
               signerName: servicedns.podcert.ate.dev/identity
               keyType: ECDSAP256
               credentialBundlePath: credential-bundle.pem
@@ -174,11 +191,29 @@ spec:
         projected:
           sources:
           - clusterTrustBundle:
+              # TODO: use a separate signer for workerpool vs. ate-system.
               signerName: podidentity.podcert.ate.dev/identity
               labelSelector:
                 matchLabels:
                   podcert.ate.dev/canarying: live
               path: trust-bundle.pem
+      - name: "service-dns-ca-certs"
+        projected:
+          sources:
+          - clusterTrustBundle:
+              signerName: servicedns.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: trust-bundle.pem
+      - name: "oidc-configs"
+        projected:
+          sources:
+          - configMap:
+              name: "ate-api-server-oidc-configs"
+              items:
+              - key: "configs.json"
+                path: "configs.json"
 ---
 # 6. Expose the Session Assigner
 apiVersion: v1
@@ -195,3 +230,23 @@ spec:
     protocol: TCP
     port: 443
     targetPort: 443
+---
+# 7. Expose the session-id broker's OIDC issuer endpoints (discovery document
+# and JWKS). A dedicated Service keeps the issuer URL (https://broker.ate-system.svc)
+# port-free and decoupled from the api Service; the servicedns signer adds the
+# broker.ate-system.svc SAN to the pod's certificate because this Service
+# selects the pod.
+apiVersion: v1
+kind: Service
+metadata:
+  name: broker
+  namespace: ate-system
+spec:
+  type: ClusterIP
+  selector:
+    app: ate-api-server
+  ports:
+  - name: https
+    protocol: TCP
+    port: 443
+    targetPort: 8443
