@@ -23,10 +23,12 @@ import (
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
 	"github.com/agent-substrate/substrate/internal/resources"
+	listersv1alpha1 "github.com/agent-substrate/substrate/pkg/client/listers/api/v1alpha1"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/workqueue"
 )
@@ -69,22 +71,24 @@ type goldenActorControl interface {
 }
 
 // ActorTemplateReconciler drives stored ActorTemplates through the golden
-// actor state machine (INITIAL -> RESUME_GOLDEN_ACTOR -> WAIT_GOLDEN_ACTOR ->
-// READY), the substrate-resource equivalent of the ActorTemplate CRD
-// controller. It runs in every ate-api replica: a per-template lock plus
-// phase-preconditioned status writes and idempotent actor operations keep
-// concurrent replicas safe.
+// actor state machine (FREEZE_SANDBOX_CONFIG -> INITIAL ->
+// RESUME_GOLDEN_ACTOR -> WAIT_GOLDEN_ACTOR -> READY), the substrate-resource
+// equivalent of the ActorTemplate CRD controller. It runs in every ate-api
+// replica: a per-template lock plus phase-preconditioned status writes and
+// idempotent actor operations keep concurrent replicas safe.
 type ActorTemplateReconciler struct {
-	persistence templateReconcilerStore
-	control     goldenActorControl
-	queue       workqueue.TypedRateLimitingInterface[resources.ActorTemplateRef]
+	persistence    templateReconcilerStore
+	control        goldenActorControl
+	sandboxConfigs listersv1alpha1.SandboxConfigLister
+	queue          workqueue.TypedRateLimitingInterface[resources.ActorTemplateRef]
 }
 
-func NewActorTemplateReconciler(persistence templateReconcilerStore, control goldenActorControl) *ActorTemplateReconciler {
+func NewActorTemplateReconciler(persistence templateReconcilerStore, control goldenActorControl, sandboxConfigs listersv1alpha1.SandboxConfigLister) *ActorTemplateReconciler {
 	return &ActorTemplateReconciler{
-		persistence: persistence,
-		control:     control,
-		queue:       workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[resources.ActorTemplateRef]()),
+		persistence:    persistence,
+		control:        control,
+		sandboxConfigs: sandboxConfigs,
+		queue:          workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[resources.ActorTemplateRef]()),
 	}
 }
 
@@ -201,6 +205,34 @@ func (r *ActorTemplateReconciler) reconcileOne(ctx context.Context, ref resource
 
 		phase := tmpl.GetStatus().GetPhase()
 		switch phase {
+		case ateapipb.ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_FREEZE_SANDBOX_CONFIG:
+			// Freeze the current content of the referenced SandboxConfig into
+			// status — before the golden actor exists — so later edits to the
+			// config don't affect this template.
+			class, ok := sandboxClassFromProto(tmpl.GetSandboxConfig().GetSandboxClass())
+			if !ok {
+				return 0, r.fail(ctx, ref, phase, fmt.Sprintf("unrecognized sandbox class %q", tmpl.GetSandboxConfig().GetSandboxClass()))
+			}
+			configName := tmpl.GetSandboxConfig().GetConfigName()
+			sc, err := r.sandboxConfigs.Get(configName)
+			if err != nil {
+				if apierrors.IsNotFound(err) {
+					return 0, r.fail(ctx, ref, phase, fmt.Sprintf("freezing sandbox config: SandboxConfig %q not found", configName))
+				}
+				return 0, fmt.Errorf("while getting SandboxConfig %q: %w", configName, err)
+			}
+			if sc.Spec.SandboxClass != class {
+				return 0, r.fail(ctx, ref, phase, fmt.Sprintf("SandboxConfig %q has class %q but the template requires %q", configName, sc.Spec.SandboxClass, class))
+			}
+
+			assets := frozenSandboxAssetsProto(tmpl.GetSandboxConfig().GetSandboxClass(), sc)
+			if tmpl, err = r.checkpoint(ctx, ref, phase, func(templateStatus *ateapipb.ActorTemplateStatus) {
+				templateStatus.Phase = ateapipb.ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_INITIAL
+				templateStatus.SandboxAssets = assets
+			}); err != nil {
+				return 0, err
+			}
+
 		case ateapipb.ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_INITIAL:
 			if _, err := r.control.CreateActor(ctx, &ateapipb.CreateActorRequest{
 				Actor: &ateapipb.Actor{

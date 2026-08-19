@@ -57,7 +57,7 @@ func (s *Service) CreateActorTemplate(ctx context.Context, req *ateapipb.CreateA
 		SnapshotsConfig: in.GetSnapshotsConfig(),
 		SandboxConfig:   in.GetSandboxConfig(),
 		Resources:       in.GetResources(),
-		Status:          &ateapipb.ActorTemplateStatus{Phase: ateapipb.ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_INITIAL},
+		Status:          &ateapipb.ActorTemplateStatus{Phase: ateapipb.ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_FREEZE_SANDBOX_CONFIG},
 	}
 	stored, err := s.persistence.CreateActorTemplate(ctx, template)
 	if err != nil {

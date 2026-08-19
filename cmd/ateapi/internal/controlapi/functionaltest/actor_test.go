@@ -1664,6 +1664,114 @@ func TestResumeActor(t *testing.T) {
 	}
 }
 
+// TestResumeActor_SubstrateTemplateBootsWithFrozenAssets proves a cold boot
+// from a substrate-store template sends the sandbox assets frozen onto the
+// template's status, not the pool's live SandboxConfig — so config edits after
+// freeze cannot change what the template's actors boot with.
+func TestResumeActor_SubstrateTemplateBootsWithFrozenAssets(t *testing.T) {
+	ns := namespaceForTest("ns-frozen-assets")
+	tc := setupTest(t, ns)
+	defer tc.cleanup()
+
+	// A live default SandboxConfig (testPauseImage) the pool path would pick.
+	ensureDefaultGvisorSandboxConfig(t, tc)
+	createWorkerPool(t, tc, ns, "pool1", map[string]string{poolLabelKey: ns})
+	createWorkerPod(t, tc, ns, "worker-1", "node1", "pool1")
+
+	frozen := &ateapipb.SandboxAssets{
+		SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR,
+		PauseImage:   "pause@sha256:frozen",
+		Assets: map[string]*ateapipb.ArchAssets{
+			"amd64": {Files: map[string]*ateapipb.AssetFile{
+				"runsc": {Url: "gs://frozen/runsc", Sha256: "frozen-sha"},
+			}},
+		},
+	}
+	// Seed the store directly: the template reconciler is not running in this
+	// harness, so freeze the assets by hand.
+	if _, err := tc.persistence.CreateActorTemplate(context.Background(), validActorTemplate(func(tmpl *ateapipb.ActorTemplate) {
+		tmpl.Metadata = &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: "frozen-tmpl"}
+		tmpl.WorkerSelector = &ateapipb.Selector{MatchLabels: map[string]string{poolLabelKey: ns}}
+		tmpl.Status = &ateapipb.ActorTemplateStatus{
+			Phase:         ateapipb.ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_READY,
+			SandboxAssets: frozen,
+		}
+	})); err != nil {
+		t.Fatalf("seed actor template: %v", err)
+	}
+
+	name := "frozen-actor"
+	if _, err := tc.client.CreateActor(context.Background(), &ateapipb.CreateActorRequest{Actor: &ateapipb.Actor{
+		Metadata:      &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: name},
+		ActorTemplate: &ateapipb.ObjectRef{Atespace: testAtespace, Name: "frozen-tmpl"},
+	}}); err != nil {
+		t.Fatalf("CreateActor failed: %v", err)
+	}
+	if _, err := tc.client.ResumeActor(context.Background(), &ateapipb.ResumeActorRequest{
+		Actor: &ateapipb.ObjectRef{Atespace: testAtespace, Name: name},
+	}); err != nil {
+		t.Fatalf("ResumeActor failed: %v", err)
+	}
+
+	if !tc.fakeAtelet.RunCalled {
+		t.Fatal("expected Run to be called (cold boot)")
+	}
+	want := &ateletpb.SandboxAssets{
+		SandboxClass: "gvisor",
+		PauseImage:   "pause@sha256:frozen",
+		Assets: map[string]*ateletpb.ArchAssets{
+			"amd64": {Files: map[string]*ateletpb.AssetFile{
+				"runsc": {Url: "gs://frozen/runsc", Sha256: "frozen-sha"},
+			}},
+		},
+	}
+	if diff := cmp.Diff(want, tc.fakeAtelet.RunRequest.GetSandboxAssets(), protocmp.Transform()); diff != "" {
+		t.Errorf("RunRequest.SandboxAssets mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestResumeActor_SubstrateTemplateWithoutFrozenAssetsFailsPrecondition pins
+// that a store-template actor never cold boots with the pool's SandboxConfig:
+// until the reconciler freezes the template's assets, resume fails rather than
+// silently falling back.
+func TestResumeActor_SubstrateTemplateWithoutFrozenAssetsFailsPrecondition(t *testing.T) {
+	ns := namespaceForTest("ns-unfrozen-assets")
+	tc := setupTest(t, ns)
+	defer tc.cleanup()
+
+	ensureDefaultGvisorSandboxConfig(t, tc)
+	createWorkerPool(t, tc, ns, "pool1", map[string]string{poolLabelKey: ns})
+	createWorkerPod(t, tc, ns, "worker-1", "node1", "pool1")
+
+	// The real API leaves the template in FREEZE_SANDBOX_CONFIG with no
+	// frozen assets; the reconciler is not running in this harness.
+	if _, err := tc.service.CreateActorTemplate(context.Background(), &ateapipb.CreateActorTemplateRequest{
+		ActorTemplate: validActorTemplate(func(tmpl *ateapipb.ActorTemplate) {
+			tmpl.Metadata = &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: "unfrozen-tmpl"}
+			tmpl.WorkerSelector = &ateapipb.Selector{MatchLabels: map[string]string{poolLabelKey: ns}}
+		}),
+	}); err != nil {
+		t.Fatalf("CreateActorTemplate: %v", err)
+	}
+
+	name := "unfrozen-actor"
+	if _, err := tc.client.CreateActor(context.Background(), &ateapipb.CreateActorRequest{Actor: &ateapipb.Actor{
+		Metadata:      &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: name},
+		ActorTemplate: &ateapipb.ObjectRef{Atespace: testAtespace, Name: "unfrozen-tmpl"},
+	}}); err != nil {
+		t.Fatalf("CreateActor failed: %v", err)
+	}
+	_, err := tc.client.ResumeActor(context.Background(), &ateapipb.ResumeActorRequest{
+		Actor: &ateapipb.ObjectRef{Atespace: testAtespace, Name: name},
+	})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("ResumeActor = %v, want FailedPrecondition", err)
+	}
+	if tc.fakeAtelet.RunCalled {
+		t.Error("Run was called, want no boot without frozen sandbox assets")
+	}
+}
+
 func TestResumeActorPassesLiteralEnv(t *testing.T) {
 	ns := namespaceForTest("ns-resume-literal-env")
 	tc := setupTest(t, ns)

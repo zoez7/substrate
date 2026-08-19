@@ -756,3 +756,18 @@ func assertSpanStr(t *testing.T, attrs map[attribute.Key]attribute.Value, key at
 		t.Errorf("%s = %q, want %q", key, v.AsString(), want)
 	}
 }
+
+// validActorTemplate returns the smallest substrate-store template that passes
+// create validation; mutations tweak it per test case.
+func validActorTemplate(mutations ...func(*ateapipb.ActorTemplate)) *ateapipb.ActorTemplate {
+	template := &ateapipb.ActorTemplate{
+		Metadata:        &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: "tmpl-a"},
+		Containers:      []*ateapipb.Container{{Name: "main", Image: "example.com/app:v1"}},
+		SnapshotsConfig: &ateapipb.SnapshotsConfig{StorageLocation: "gs://my-bucket/snapshots"},
+		SandboxConfig:   &ateapipb.SandboxConfig{SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR, ConfigName: "gvisor-default"},
+	}
+	for _, m := range mutations {
+		m(template)
+	}
+	return template
+}

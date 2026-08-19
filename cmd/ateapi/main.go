@@ -195,7 +195,7 @@ func main() {
 	ateletDialer := controlapi.NewAteletDialer(workerPodInformer.GetIndexer(), ateletPodInformer.GetIndexer(), *ateletClientCredBundle, *podIdentityCACerts)
 	sm := controlapi.NewService(persistence, workerCache, actorTemplateLister, workerPoolLister, sandboxConfigLister, csiDriverConfigLister, storageClassLister, ateletDialer, instruments, *egressGatewayAddress, volPlugins)
 
-	templateReconciler := controlapi.NewActorTemplateReconciler(persistence, sm)
+	templateReconciler := controlapi.NewActorTemplateReconciler(persistence, sm, sandboxConfigLister)
 	templateReconciler.Start(ctx)
 
 	actorIdentitySrv := actoridentity.New(actorIdentityJWTIssuer, *actorIDJWTPoolFile, *actorIDCAPoolFile, persistence, workerCache)

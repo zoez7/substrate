@@ -235,7 +235,7 @@ func TestCreateActorTemplateIgnoresServerOwnedFields(t *testing.T) {
 		tmpl.Containers = in.GetContainers()
 		tmpl.SnapshotsConfig = in.GetSnapshotsConfig()
 		tmpl.Resources = in.GetResources()
-		tmpl.Status = &ateapipb.ActorTemplateStatus{Phase: ateapipb.ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_INITIAL}
+		tmpl.Status = &ateapipb.ActorTemplateStatus{Phase: ateapipb.ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_FREEZE_SANDBOX_CONFIG}
 	})
 	if diff := cmp.Diff(want, created, protocmp.Transform(), ignoreUID, ignoreTimestamps); diff != "" {
 		t.Errorf("CreateActorTemplate response mismatch (-want +got):\n%s", diff)

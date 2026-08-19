@@ -50,6 +50,12 @@ type resumeSnapshotSource struct {
 	// selects the golden snapshot as the boot source for the pending restore:
 	// restore then combines the golden snapshot with the actor's data.
 	GoldenSnapshotURI resources.SnapshotURI
+	// FrozenSandboxAssets is the asset set frozen onto a substrate-store
+	// ActorTemplate's status, so cold boots use what the template froze
+	// rather than the pool's current SandboxConfig. Nil for legacy CRD
+	// templates (cold boot resolves from the WorkerPool) and for store
+	// templates not yet frozen (cold boot then fails FailedPrecondition).
+	FrozenSandboxAssets *ateapipb.SandboxAssets
 }
 
 // restoreTelemetry labels the restore operation for the resume lifecycle
@@ -161,10 +167,11 @@ func (w *ActorWorkflow) loadActorForResume(ctx context.Context, actorRef resourc
 		return actor, nil, src, nil
 	}
 
-	actorTemplate, err := resolveActorTemplate(ctx, w.store, w.actorTemplateLister, actor)
+	actorTemplate, frozenAssets, err := resolveActorTemplate(ctx, w.store, w.actorTemplateLister, actor)
 	if err != nil {
 		return nil, nil, src, fmt.Errorf("while getting ActorTemplate: %w", err)
 	}
+	src.FrozenSandboxAssets = frozenAssets
 	if ref := actor.GetStatus().GetLatestSnapshot(); ref != nil {
 		snapshot, err := w.store.GetActorSnapshot(ctx, ref.GetAtespace(), ref.GetName())
 		if errors.Is(err, store.ErrNotFound) {
@@ -722,11 +729,25 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 		slog.InfoContext(ctx, "Actor has no snapshot; ActorTemplate has no golden snapshot; Booting from ActorTemplate spec")
 		tele.SnapshotKind = ateattr.SnapshotKindBoot
 
-		// Booting from scratch: resolve the sandbox binaries from the pool's
-		// SandboxConfig and send them so atelet can fetch and record them.
-		// (Restores above are self-describing via the snapshot manifest.)
-		sandboxAssets, err := resolveSandboxAssets(w.workerPoolLister, w.sandboxConfigLister, assignment.GetWorkerNamespace(), assignment.GetWorkerPool())
-		if err != nil {
+		// Booting from scratch: send the sandbox binaries so atelet can fetch
+		// and record them. Substrate-store templates boot with the assets
+		// frozen onto their status; legacy CRD templates resolve from the
+		// pool's SandboxConfig. (Restores above are self-describing via the
+		// snapshot manifest.)
+		var sandboxAssets *ateletpb.SandboxAssets
+		if actor.GetActorTemplate() != nil {
+			// Never fall back to the pool's config: later SandboxConfig edits
+			// must not change what a template's actors boot with, or they
+			// drift snapshot-incompatible with the golden.
+			if src.FrozenSandboxAssets == nil {
+				return tele, status.Errorf(codes.FailedPrecondition,
+					"ActorTemplate %s/%s has no frozen sandbox assets; wait for template reconciliation to freeze the sandbox config",
+					templateNamespace, templateName)
+			}
+			if sandboxAssets, err = frozenSandboxAssetsToWire(src.FrozenSandboxAssets); err != nil {
+				return tele, fmt.Errorf("ActorTemplate %s/%s: %w", templateNamespace, templateName, err)
+			}
+		} else if sandboxAssets, err = resolveSandboxAssets(w.workerPoolLister, w.sandboxConfigLister, assignment.GetWorkerNamespace(), assignment.GetWorkerPool()); err != nil {
 			return tele, fmt.Errorf("while resolving sandbox assets: %w", err)
 		}
 

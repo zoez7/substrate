@@ -25,6 +25,7 @@ import (
 	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"github.com/google/go-cmp/cmp"
+	"google.golang.org/protobuf/testing/protocmp"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -296,6 +297,39 @@ func TestLoadActorForResume_SubstrateTemplateGolden(t *testing.T) {
 	}
 	if got := src.SnapshotURI.String(); got != goldenURI {
 		t.Errorf("src.SnapshotURI = %q, want the golden snapshot URI %q", got, goldenURI)
+	}
+}
+
+// TestLoadActorForResume_SubstrateTemplateFrozenAssets proves the frozen
+// sandbox assets on a store template's status travel into the resolved boot
+// source, so the boot path can use them instead of the pool's SandboxConfig.
+func TestLoadActorForResume_SubstrateTemplateFrozenAssets(t *testing.T) {
+	ctx := context.Background()
+	persistence := newTestPersistence(t)
+	actorRef := resources.ActorRef{Atespace: "team-a", Name: "actor-1"}
+
+	frozen := &ateapipb.SandboxAssets{
+		SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR,
+		PauseImage:   "registry.k8s.io/pause@sha256:frozen",
+		Assets: map[string]*ateapipb.ArchAssets{
+			"amd64": {Files: map[string]*ateapipb.AssetFile{
+				"gvisor": {Url: "gs://bucket/gvisor.tar.bz2", Sha256: "abc"},
+			}},
+		},
+	}
+	w, _ := seedSubstrateTemplateActor(t, ctx, persistence, actorRef, ateapipb.ActorState_ACTOR_STATE_SUSPENDED, func(tmpl *ateapipb.ActorTemplate) {
+		tmpl.Status = &ateapipb.ActorTemplateStatus{
+			Phase:         ateapipb.ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_READY,
+			SandboxAssets: frozen,
+		}
+	})
+
+	_, _, src, err := w.loadActorForResume(ctx, actorRef, false)
+	if err != nil {
+		t.Fatalf("loadActorForResume: %v", err)
+	}
+	if diff := cmp.Diff(frozen, src.FrozenSandboxAssets, protocmp.Transform()); diff != "" {
+		t.Errorf("src.FrozenSandboxAssets mismatch (-want +got):\n%s", diff)
 	}
 }
 

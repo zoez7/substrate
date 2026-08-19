@@ -399,11 +399,14 @@ enum ActorTemplatePhase {
   ACTOR_TEMPLATE_PHASE_WAIT_GOLDEN_ACTOR = 3;
   ACTOR_TEMPLATE_PHASE_READY = 4;
   ACTOR_TEMPLATE_PHASE_FAILED = 5;
+  ACTOR_TEMPLATE_PHASE_FREEZE_SANDBOX_CONFIG = 6;
 }
 
 message ActorTemplateStatus {
-  // State machine, mirroring the ActorTemplate CRD PhaseType:
-  // INITIAL -> RESUME_GOLDEN_ACTOR -> WAIT_GOLDEN_ACTOR -> {READY | FAILED}.
+  // State machine:
+  // FREEZE_SANDBOX_CONFIG -> INITIAL -> RESUME_GOLDEN_ACTOR ->
+  // WAIT_GOLDEN_ACTOR -> {READY | FAILED}.
+  // From INITIAL on it mirrors the ActorTemplate CRD PhaseType.
   // READY and FAILED are terminal; the version is only usable once READY.
   ActorTemplatePhase phase = 1;
 
@@ -416,8 +419,9 @@ message ActorTemplateStatus {
   // READY.
   ObjectRef golden_snapshot = 3;
 
-  // sandbox_assets is the referenced SandboxConfig's content frozen at
-  // creation time.
+  // sandbox_assets is the referenced SandboxConfig's content, frozen during
+  // the FREEZE_SANDBOX_CONFIG phase — before the golden actor is created —
+  // so later config edits don't affect this template.
   SandboxAssets sandbox_assets = 4;
 
   // take_golden_snapshot_at is when the golden-actor warmup ends and the

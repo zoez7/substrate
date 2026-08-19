@@ -263,12 +263,13 @@ func (SandboxClass) EnumDescriptor() ([]byte, []int) {
 type ActorTemplatePhase int32
 
 const (
-	ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_UNSPECIFIED         ActorTemplatePhase = 0
-	ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_INITIAL             ActorTemplatePhase = 1
-	ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_RESUME_GOLDEN_ACTOR ActorTemplatePhase = 2
-	ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_WAIT_GOLDEN_ACTOR   ActorTemplatePhase = 3
-	ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_READY               ActorTemplatePhase = 4
-	ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_FAILED              ActorTemplatePhase = 5
+	ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_UNSPECIFIED           ActorTemplatePhase = 0
+	ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_INITIAL               ActorTemplatePhase = 1
+	ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_RESUME_GOLDEN_ACTOR   ActorTemplatePhase = 2
+	ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_WAIT_GOLDEN_ACTOR     ActorTemplatePhase = 3
+	ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_READY                 ActorTemplatePhase = 4
+	ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_FAILED                ActorTemplatePhase = 5
+	ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_FREEZE_SANDBOX_CONFIG ActorTemplatePhase = 6
 )
 
 // Enum value maps for ActorTemplatePhase.
@@ -280,14 +281,16 @@ var (
 		3: "ACTOR_TEMPLATE_PHASE_WAIT_GOLDEN_ACTOR",
 		4: "ACTOR_TEMPLATE_PHASE_READY",
 		5: "ACTOR_TEMPLATE_PHASE_FAILED",
+		6: "ACTOR_TEMPLATE_PHASE_FREEZE_SANDBOX_CONFIG",
 	}
 	ActorTemplatePhase_value = map[string]int32{
-		"ACTOR_TEMPLATE_PHASE_UNSPECIFIED":         0,
-		"ACTOR_TEMPLATE_PHASE_INITIAL":             1,
-		"ACTOR_TEMPLATE_PHASE_RESUME_GOLDEN_ACTOR": 2,
-		"ACTOR_TEMPLATE_PHASE_WAIT_GOLDEN_ACTOR":   3,
-		"ACTOR_TEMPLATE_PHASE_READY":               4,
-		"ACTOR_TEMPLATE_PHASE_FAILED":              5,
+		"ACTOR_TEMPLATE_PHASE_UNSPECIFIED":           0,
+		"ACTOR_TEMPLATE_PHASE_INITIAL":               1,
+		"ACTOR_TEMPLATE_PHASE_RESUME_GOLDEN_ACTOR":   2,
+		"ACTOR_TEMPLATE_PHASE_WAIT_GOLDEN_ACTOR":     3,
+		"ACTOR_TEMPLATE_PHASE_READY":                 4,
+		"ACTOR_TEMPLATE_PHASE_FAILED":                5,
+		"ACTOR_TEMPLATE_PHASE_FREEZE_SANDBOX_CONFIG": 6,
 	}
 )
 
@@ -1722,8 +1725,10 @@ func (x *Limits) GetQuantity() string {
 
 type ActorTemplateStatus struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// State machine, mirroring the ActorTemplate CRD PhaseType:
-	// INITIAL -> RESUME_GOLDEN_ACTOR -> WAIT_GOLDEN_ACTOR -> {READY | FAILED}.
+	// State machine:
+	// FREEZE_SANDBOX_CONFIG -> INITIAL -> RESUME_GOLDEN_ACTOR ->
+	// WAIT_GOLDEN_ACTOR -> {READY | FAILED}.
+	// From INITIAL on it mirrors the ActorTemplate CRD PhaseType.
 	// READY and FAILED are terminal; the version is only usable once READY.
 	Phase ActorTemplatePhase `protobuf:"varint,1,opt,name=phase,proto3,enum=ateapi.ActorTemplatePhase" json:"phase,omitempty"`
 	// message is a human-readable explanation of the current state, most
@@ -1733,8 +1738,9 @@ type ActorTemplateStatus struct {
 	// system atespace, built for this version by ate-api. Set once state is
 	// READY.
 	GoldenSnapshot *ObjectRef `protobuf:"bytes,3,opt,name=golden_snapshot,json=goldenSnapshot,proto3" json:"golden_snapshot,omitempty"`
-	// sandbox_assets is the referenced SandboxConfig's content frozen at
-	// creation time.
+	// sandbox_assets is the referenced SandboxConfig's content, frozen during
+	// the FREEZE_SANDBOX_CONFIG phase — before the golden actor is created —
+	// so later config edits don't affect this template.
 	SandboxAssets *SandboxAssets `protobuf:"bytes,4,opt,name=sandbox_assets,json=sandboxAssets,proto3" json:"sandbox_assets,omitempty"`
 	// take_golden_snapshot_at is when the golden-actor warmup ends and the
 	// golden snapshot may be taken. Set on the RESUME_GOLDEN_ACTOR ->
@@ -5568,14 +5574,15 @@ const file_ateapi_proto_rawDesc = "" +
 	"\fSandboxClass\x12\x1d\n" +
 	"\x19SANDBOX_CLASS_UNSPECIFIED\x10\x00\x12\x18\n" +
 	"\x14SANDBOX_CLASS_GVISOR\x10\x01\x12\x19\n" +
-	"\x15SANDBOX_CLASS_MICROVM\x10\x02*\xf7\x01\n" +
+	"\x15SANDBOX_CLASS_MICROVM\x10\x02*\xa7\x02\n" +
 	"\x12ActorTemplatePhase\x12$\n" +
 	" ACTOR_TEMPLATE_PHASE_UNSPECIFIED\x10\x00\x12 \n" +
 	"\x1cACTOR_TEMPLATE_PHASE_INITIAL\x10\x01\x12,\n" +
 	"(ACTOR_TEMPLATE_PHASE_RESUME_GOLDEN_ACTOR\x10\x02\x12*\n" +
 	"&ACTOR_TEMPLATE_PHASE_WAIT_GOLDEN_ACTOR\x10\x03\x12\x1e\n" +
 	"\x1aACTOR_TEMPLATE_PHASE_READY\x10\x04\x12\x1f\n" +
-	"\x1bACTOR_TEMPLATE_PHASE_FAILED\x10\x05*d\n" +
+	"\x1bACTOR_TEMPLATE_PHASE_FAILED\x10\x05\x12.\n" +
+	"*ACTOR_TEMPLATE_PHASE_FREEZE_SANDBOX_CONFIG\x10\x06*d\n" +
 	"\fResumeSource\x12\x1d\n" +
 	"\x19RESUME_SOURCE_UNSPECIFIED\x10\x00\x12\x1b\n" +
 	"\x17RESUME_SOURCE_COLD_BOOT\x10\x01\x12\x18\n" +

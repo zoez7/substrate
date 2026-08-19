@@ -20,6 +20,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
 	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
 	listersv1alpha1 "github.com/agent-substrate/substrate/pkg/client/listers/api/v1alpha1"
+	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"k8s.io/apimachinery/pkg/labels"
 )
 
@@ -83,6 +84,59 @@ func defaultSandboxConfig(lister listersv1alpha1.SandboxConfigLister, class atev
 		return nil, fmt.Errorf("no default SandboxConfig for class %q; set one with spec.default=true or name one via WorkerPool.spec.sandboxConfigName", class)
 	}
 	return match, nil
+}
+
+// frozenSandboxAssetsProto is the ateapipb twin of sandboxAssetsProto,
+// producing the SandboxAssets frozen onto an ActorTemplate's status.
+func frozenSandboxAssetsProto(class ateapipb.SandboxClass, sc *atev1alpha1.SandboxConfig) *ateapipb.SandboxAssets {
+	out := &ateapipb.SandboxAssets{
+		SandboxClass: class,
+		PauseImage:   sc.Spec.PauseImage,
+		Assets:       make(map[string]*ateapipb.ArchAssets, len(sc.Spec.Assets)),
+	}
+	for arch, files := range sc.Spec.Assets {
+		archAssets := &ateapipb.ArchAssets{Files: make(map[string]*ateapipb.AssetFile, len(files))}
+		for name, f := range files {
+			archAssets.Files[name] = &ateapipb.AssetFile{Url: f.URL, Sha256: f.SHA256}
+		}
+		out.Assets[arch] = archAssets
+	}
+	return out
+}
+
+// frozenSandboxAssetsToWire converts the SandboxAssets frozen onto a
+// substrate-store ActorTemplate's status (frozenSandboxAssetsProto's output)
+// into the ateletpb twin atelet fetches.
+func frozenSandboxAssetsToWire(f *ateapipb.SandboxAssets) (*ateletpb.SandboxAssets, error) {
+	class, ok := sandboxClassFromProto(f.GetSandboxClass())
+	if !ok {
+		return nil, fmt.Errorf("frozen sandbox assets have unsupported sandbox class %v", f.GetSandboxClass())
+	}
+	out := &ateletpb.SandboxAssets{
+		SandboxClass: string(class),
+		PauseImage:   f.GetPauseImage(),
+		Assets:       make(map[string]*ateletpb.ArchAssets, len(f.GetAssets())),
+	}
+	for arch, files := range f.GetAssets() {
+		archAssets := &ateletpb.ArchAssets{Files: make(map[string]*ateletpb.AssetFile, len(files.GetFiles()))}
+		for name, af := range files.GetFiles() {
+			archAssets.Files[name] = &ateletpb.AssetFile{Url: af.GetUrl(), Sha256: af.GetSha256()}
+		}
+		out.Assets[arch] = archAssets
+	}
+	return out, nil
+}
+
+// sandboxClassFromProto maps the proto sandbox class onto the CRD's, false
+// for values with no CRD counterpart.
+func sandboxClassFromProto(class ateapipb.SandboxClass) (atev1alpha1.SandboxClass, bool) {
+	switch class {
+	case ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR:
+		return atev1alpha1.SandboxClassGvisor, true
+	case ateapipb.SandboxClass_SANDBOX_CLASS_MICROVM:
+		return atev1alpha1.SandboxClassMicroVM, true
+	}
+	return "", false
 }
 
 // sandboxAssetsProto converts a resolved SandboxConfig into the proto atelet

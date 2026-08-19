@@ -35,16 +35,23 @@ type actorTemplateGetter interface {
 // resolveActorTemplate loads the actor's template from whichever reference
 // the actor carries: the substrate store ObjectRef, or the legacy CRD lister.
 // Not-found errors pass through unmapped (store or k8s flavored) for the
-// caller to translate.
-func resolveActorTemplate(ctx context.Context, st actorTemplateGetter, lister listersv1alpha1.ActorTemplateLister, actor *ateapipb.Actor) (*atev1alpha1.ActorTemplate, error) {
+// caller to translate. The second return is the sandbox assets frozen onto
+// the store template's status — nil for legacy CRD templates and for store
+// templates the reconciler has not yet frozen.
+func resolveActorTemplate(ctx context.Context, st actorTemplateGetter, lister listersv1alpha1.ActorTemplateLister, actor *ateapipb.Actor) (*atev1alpha1.ActorTemplate, *ateapipb.SandboxAssets, error) {
 	if ref := actor.GetActorTemplate(); ref != nil {
 		stored, err := st.GetActorTemplate(ctx, resources.ActorTemplateRefFromObjectRef(ref))
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		return actorTemplateFromProto(stored)
+		tmpl, err := actorTemplateFromProto(stored)
+		if err != nil {
+			return nil, nil, err
+		}
+		return tmpl, stored.GetStatus().GetSandboxAssets(), nil
 	}
-	return lister.ActorTemplates(actor.GetActorTemplateNamespace()).Get(actor.GetActorTemplateName())
+	tmpl, err := lister.ActorTemplates(actor.GetActorTemplateNamespace()).Get(actor.GetActorTemplateName())
+	return tmpl, nil, err
 }
 
 // actorTemplateFromProto builds an in-memory CRD-shaped ActorTemplate from a
@@ -146,9 +153,10 @@ func actorTemplateFromProto(t *ateapipb.ActorTemplate) (*atev1alpha1.ActorTempla
 		OnResume: atev1alpha1.OnResumeConfig{FromData: fromData},
 	}
 
-	// SandboxConfig.config_name has no CRD-spec counterpart and is unused by
-	// the workflow (cold-boot assets resolve from the WorkerPool), so only
-	// the class carries over.
+	// SandboxConfig.config_name has no CRD-spec counterpart: the reconciler
+	// consumes it at freeze time, and cold boots use the frozen
+	// status.sandbox_assets (threaded alongside this bridge, which has no
+	// assets field). Only the class carries over, for pool scheduling.
 	switch class := t.GetSandboxConfig().GetSandboxClass(); class {
 	case ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR:
 		out.Spec.SandboxClass = atev1alpha1.SandboxClassGvisor

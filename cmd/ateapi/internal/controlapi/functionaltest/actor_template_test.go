@@ -60,7 +60,7 @@ func TestActorTemplateCRUD(t *testing.T) {
 			ConfigName:   "gvisor-default",
 		},
 		Resources: &ateapipb.Resources{Limits: []*ateapipb.Limits{{Name: "memory", Quantity: "1Gi"}}},
-		Status:    &ateapipb.ActorTemplateStatus{Phase: ateapipb.ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_INITIAL},
+		Status:    &ateapipb.ActorTemplateStatus{Phase: ateapipb.ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_FREEZE_SANDBOX_CONFIG},
 	}
 	if diff := cmp.Diff(want, created, protocmp.Transform(), ignoreUID, ignoreTimestamps); diff != "" {
 		t.Errorf("CreateActorTemplate response mismatch (-want +got):\n%s", diff)

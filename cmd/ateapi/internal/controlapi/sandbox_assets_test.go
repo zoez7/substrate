@@ -19,6 +19,9 @@ import (
 
 	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
 	listersv1alpha1 "github.com/agent-substrate/substrate/pkg/client/listers/api/v1alpha1"
+	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	"github.com/google/go-cmp/cmp"
+	"google.golang.org/protobuf/testing/protocmp"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/cache"
 )
@@ -45,6 +48,34 @@ func listersFor(t *testing.T, pools []*atev1alpha1.WorkerPool, configs []*atev1a
 func testAssets() map[string]map[string]atev1alpha1.AssetFile {
 	return map[string]map[string]atev1alpha1.AssetFile{
 		"amd64": {"gvisor": {URL: "gs://bucket/gvisor.tar.bz2", SHA256: "abc"}},
+	}
+}
+
+// TestFrozenSandboxAssetsToWire pins that the freeze→thaw path produces the
+// same wire assets as resolving the SandboxConfig directly, so store-template
+// actors boot identically to what the pool path would have sent at freeze
+// time — pause image included.
+func TestFrozenSandboxAssetsToWire(t *testing.T) {
+	sc := &atev1alpha1.SandboxConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: "gvisor-default"},
+		Spec: atev1alpha1.SandboxConfigSpec{
+			SandboxClass: atev1alpha1.SandboxClassGvisor,
+			PauseImage:   "registry.k8s.io/pause@sha256:default",
+			Assets:       testAssets(),
+		},
+	}
+
+	got, err := frozenSandboxAssetsToWire(frozenSandboxAssetsProto(ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR, sc))
+	if err != nil {
+		t.Fatalf("frozenSandboxAssetsToWire() error: %v", err)
+	}
+	want := sandboxAssetsProto(atev1alpha1.SandboxClassGvisor, sc)
+	if diff := cmp.Diff(want, got, protocmp.Transform()); diff != "" {
+		t.Errorf("frozenSandboxAssetsToWire() mismatch (-want +got):\n%s", diff)
+	}
+
+	if _, err := frozenSandboxAssetsToWire(&ateapipb.SandboxAssets{}); err == nil {
+		t.Error("frozenSandboxAssetsToWire(unspecified class) = nil error, want error")
 	}
 }
 

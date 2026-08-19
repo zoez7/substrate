@@ -99,7 +99,7 @@ func (w *ActorWorkflow) loadActorForSuspend(ctx context.Context, actorRef resour
 	if err != nil {
 		return nil, nil, err
 	}
-	actorTemplate, err := resolveActorTemplate(ctx, w.store, w.actorTemplateLister, actor)
+	actorTemplate, _, err := resolveActorTemplate(ctx, w.store, w.actorTemplateLister, actor)
 	if err != nil {
 		return nil, nil, fmt.Errorf("while getting ActorTemplate: %w", err)
 	}

@@ -52,7 +52,7 @@ func (s *Service) CreateActor(ctx context.Context, req *ateapipb.CreateActorRequ
 
 	setSpanActorRefAttributes(ctx, resources.ActorRefFromActor(in))
 
-	template, err := resolveActorTemplate(ctx, s.persistence, s.actorTemplateLister, in)
+	template, _, err := resolveActorTemplate(ctx, s.persistence, s.actorTemplateLister, in)
 	if err != nil {
 		if k8serrors.IsNotFound(err) || errors.Is(err, store.ErrNotFound) {
 			return nil, status.Errorf(codes.FailedPrecondition, "ActorTemplate %s/%s not found", templateNamespace, templateName)

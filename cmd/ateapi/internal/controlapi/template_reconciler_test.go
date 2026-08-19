@@ -23,10 +23,12 @@ import (
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
 	"github.com/agent-substrate/substrate/internal/resources"
+	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 )
 
@@ -131,12 +133,33 @@ func getPhase(t *testing.T, persistence store.Interface, ref resources.ActorTemp
 	return tmpl
 }
 
+// testSandboxConfig is the SandboxConfig validActorTemplate references by
+// name.
+func testSandboxConfig() *atev1alpha1.SandboxConfig {
+	return &atev1alpha1.SandboxConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: "gvisor-default"},
+		Spec: atev1alpha1.SandboxConfigSpec{
+			SandboxClass: atev1alpha1.SandboxClassGvisor,
+			PauseImage:   "registry.k8s.io/pause@sha256:golden",
+			Assets:       testAssets(),
+		},
+	}
+}
+
+// newTestTemplateReconciler wires a reconciler over the given SandboxConfigs;
+// pass testSandboxConfig() unless the test targets freeze failures.
+func newTestTemplateReconciler(t *testing.T, persistence store.Interface, control *fakeGoldenControl, configs ...*atev1alpha1.SandboxConfig) *ActorTemplateReconciler {
+	t.Helper()
+	_, sandboxConfigs := listersFor(t, nil, configs)
+	return NewActorTemplateReconciler(persistence, control, sandboxConfigs)
+}
+
 func TestTemplateReconcileHappyPathZeroWarmup(t *testing.T) {
 	ctx := t.Context()
 	persistence := newTestPersistence(t)
 	control := &fakeGoldenControl{}
-	r := NewActorTemplateReconciler(persistence, control)
-	ref := seedTemplate(t, persistence, ateapipb.ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_INITIAL, withReadyz)
+	r := newTestTemplateReconciler(t, persistence, control, testSandboxConfig())
+	ref := seedTemplate(t, persistence, ateapipb.ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_FREEZE_SANDBOX_CONFIG, withReadyz)
 
 	requeueAfter, err := r.reconcileOne(ctx, ref)
 	if err != nil || requeueAfter != 0 {
@@ -150,8 +173,93 @@ func TestTemplateReconcileHappyPathZeroWarmup(t *testing.T) {
 	if got := tmpl.GetStatus().GetGoldenSnapshot().GetName(); got != "golden-snap" {
 		t.Errorf("golden snapshot = %q, want %q", got, "golden-snap")
 	}
+	assets := tmpl.GetStatus().GetSandboxAssets()
+	if got, want := assets.GetPauseImage(), testSandboxConfig().Spec.PauseImage; got != want {
+		t.Errorf("frozen pause image = %q, want %q", got, want)
+	}
+	if got := assets.GetSandboxClass(); got != ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR {
+		t.Errorf("frozen sandbox class = %v, want GVISOR", got)
+	}
+	if got, want := assets.GetAssets()["amd64"].GetFiles()["gvisor"].GetSha256(), testAssets()["amd64"]["gvisor"].SHA256; got != want {
+		t.Errorf("frozen asset sha256 = %q, want %q", got, want)
+	}
 	if create, resume, suspend := control.calls(); create != 1 || resume != 1 || suspend != 1 {
 		t.Errorf("control calls = (%d, %d, %d), want (1, 1, 1)", create, resume, suspend)
+	}
+}
+
+// TestTemplateReconcileResumesFromInitialPhase pins that a template observed
+// past FREEZE_SANDBOX_CONFIG (e.g. after a crash between checkpoints) picks up
+// mid-machine and runs to READY without re-freezing.
+func TestTemplateReconcileResumesFromInitialPhase(t *testing.T) {
+	ctx := t.Context()
+	persistence := newTestPersistence(t)
+	control := &fakeGoldenControl{}
+	r := newTestTemplateReconciler(t, persistence, control, testSandboxConfig())
+	ref := seedTemplate(t, persistence, ateapipb.ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_INITIAL, withReadyz)
+
+	requeueAfter, err := r.reconcileOne(ctx, ref)
+	if err != nil || requeueAfter != 0 {
+		t.Fatalf("reconcileOne = (%v, %v), want (0, nil)", requeueAfter, err)
+	}
+	tmpl := getPhase(t, persistence, ref)
+	if got := tmpl.GetStatus().GetPhase(); got != ateapipb.ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_READY {
+		t.Errorf("phase = %v, want READY", got)
+	}
+	if tmpl.GetStatus().GetSandboxAssets() != nil {
+		t.Error("SandboxAssets set, want the freeze phase not to rerun from INITIAL")
+	}
+	if create, resume, suspend := control.calls(); create != 1 || resume != 1 || suspend != 1 {
+		t.Errorf("control calls = (%d, %d, %d), want (1, 1, 1)", create, resume, suspend)
+	}
+}
+
+func TestTemplateReconcileSandboxConfigNotFoundFails(t *testing.T) {
+	ctx := t.Context()
+	persistence := newTestPersistence(t)
+	control := &fakeGoldenControl{}
+	// No SandboxConfigs in the lister: the template's config_name dangles.
+	r := newTestTemplateReconciler(t, persistence, control)
+	ref := seedTemplate(t, persistence, ateapipb.ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_FREEZE_SANDBOX_CONFIG, withReadyz)
+
+	requeueAfter, err := r.reconcileOne(ctx, ref)
+	if err != nil || requeueAfter != 0 {
+		t.Fatalf("reconcileOne = (%v, %v), want (0, nil)", requeueAfter, err)
+	}
+	tmpl := getPhase(t, persistence, ref)
+	if got := tmpl.GetStatus().GetPhase(); got != ateapipb.ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_FAILED {
+		t.Errorf("phase = %v, want FAILED", got)
+	}
+	if got := tmpl.GetStatus().GetMessage(); !strings.Contains(got, `SandboxConfig "gvisor-default" not found`) {
+		t.Errorf("message = %q, want it to name the missing SandboxConfig", got)
+	}
+	if create, _, _ := control.calls(); create != 0 {
+		t.Errorf("CreateActor called %d times after a freeze failure, want 0", create)
+	}
+}
+
+func TestTemplateReconcileSandboxClassMismatchFails(t *testing.T) {
+	ctx := t.Context()
+	persistence := newTestPersistence(t)
+	control := &fakeGoldenControl{}
+	mismatched := testSandboxConfig()
+	mismatched.Spec.SandboxClass = atev1alpha1.SandboxClassMicroVM
+	r := newTestTemplateReconciler(t, persistence, control, mismatched)
+	ref := seedTemplate(t, persistence, ateapipb.ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_FREEZE_SANDBOX_CONFIG, withReadyz)
+
+	requeueAfter, err := r.reconcileOne(ctx, ref)
+	if err != nil || requeueAfter != 0 {
+		t.Fatalf("reconcileOne = (%v, %v), want (0, nil)", requeueAfter, err)
+	}
+	tmpl := getPhase(t, persistence, ref)
+	if got := tmpl.GetStatus().GetPhase(); got != ateapipb.ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_FAILED {
+		t.Errorf("phase = %v, want FAILED", got)
+	}
+	if got := tmpl.GetStatus().GetMessage(); !strings.Contains(got, "class") {
+		t.Errorf("message = %q, want it to mention the class mismatch", got)
+	}
+	if create, _, _ := control.calls(); create != 0 {
+		t.Errorf("CreateActor called %d times after a freeze failure, want 0", create)
 	}
 }
 
@@ -159,8 +267,8 @@ func TestTemplateReconcileWarmupRequestsRequeue(t *testing.T) {
 	ctx := t.Context()
 	persistence := newTestPersistence(t)
 	control := &fakeGoldenControl{}
-	r := NewActorTemplateReconciler(persistence, control)
-	ref := seedTemplate(t, persistence, ateapipb.ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_INITIAL)
+	r := newTestTemplateReconciler(t, persistence, control, testSandboxConfig())
+	ref := seedTemplate(t, persistence, ateapipb.ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_FREEZE_SANDBOX_CONFIG)
 
 	requeueAfter, err := r.reconcileOne(ctx, ref)
 	if err != nil {
@@ -186,7 +294,7 @@ func TestTemplateReconcileWaitDeadlinePassed(t *testing.T) {
 	ctx := t.Context()
 	persistence := newTestPersistence(t)
 	control := &fakeGoldenControl{}
-	r := NewActorTemplateReconciler(persistence, control)
+	r := newTestTemplateReconciler(t, persistence, control, testSandboxConfig())
 	ref := seedTemplate(t, persistence, ateapipb.ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_WAIT_GOLDEN_ACTOR, func(tmpl *ateapipb.ActorTemplate) {
 		tmpl.Status.TakeGoldenSnapshotAt = timestamppb.New(time.Now().Add(-time.Second))
 	})
@@ -204,7 +312,7 @@ func TestTemplateReconcileErrorRequeuesRateLimited(t *testing.T) {
 	ctx := t.Context()
 	persistence := newTestPersistence(t)
 	control := &fakeGoldenControl{resumeErr: status.Error(codes.Unavailable, "atelet down")}
-	r := NewActorTemplateReconciler(persistence, control)
+	r := newTestTemplateReconciler(t, persistence, control, testSandboxConfig())
 	ref := seedTemplate(t, persistence, ateapipb.ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_INITIAL, withReadyz)
 
 	r.queue.Add(ref)
@@ -227,7 +335,7 @@ func TestTemplateReconcileLockConflictDrops(t *testing.T) {
 	ctx := t.Context()
 	persistence := newTestPersistence(t)
 	control := &fakeGoldenControl{}
-	r := NewActorTemplateReconciler(persistence, control)
+	r := newTestTemplateReconciler(t, persistence, control, testSandboxConfig())
 	ref := seedTemplate(t, persistence, ateapipb.ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_INITIAL, withReadyz)
 
 	lock, err := persistence.AcquireLock(ctx, "lock:actortemplate:"+ref.Atespace+":"+ref.Name)
@@ -252,7 +360,7 @@ func TestTemplateReconcileStalePhaseDrops(t *testing.T) {
 	ctx := t.Context()
 	persistence := newTestPersistence(t)
 	control := &fakeGoldenControl{}
-	r := NewActorTemplateReconciler(persistence, control)
+	r := newTestTemplateReconciler(t, persistence, control, testSandboxConfig())
 	ref := seedTemplate(t, persistence, ateapipb.ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_INITIAL, withReadyz)
 
 	// A concurrent writer flips the phase between the actor op and the
@@ -289,7 +397,7 @@ func TestTemplateReconcileInvalidArgumentFails(t *testing.T) {
 	ctx := t.Context()
 	persistence := newTestPersistence(t)
 	control := &fakeGoldenControl{createErr: status.Error(codes.InvalidArgument, "bad image")}
-	r := NewActorTemplateReconciler(persistence, control)
+	r := newTestTemplateReconciler(t, persistence, control, testSandboxConfig())
 	ref := seedTemplate(t, persistence, ateapipb.ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_INITIAL, withReadyz)
 
 	requeueAfter, err := r.reconcileOne(ctx, ref)
@@ -309,7 +417,7 @@ func TestTemplateResyncEnqueues(t *testing.T) {
 	ctx := t.Context()
 	persistence := newTestPersistence(t)
 	control := &fakeGoldenControl{}
-	r := NewActorTemplateReconciler(persistence, control)
+	r := newTestTemplateReconciler(t, persistence, control, testSandboxConfig())
 
 	const futureDelay = 500 * time.Millisecond
 	phases := []struct {
@@ -320,6 +428,7 @@ func TestTemplateResyncEnqueues(t *testing.T) {
 		{"tmpl-ready", ateapipb.ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_READY, nil},
 		{"tmpl-failed", ateapipb.ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_FAILED, nil},
 		{"tmpl-initial", ateapipb.ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_INITIAL, nil},
+		{"tmpl-freeze", ateapipb.ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_FREEZE_SANDBOX_CONFIG, nil},
 		{"tmpl-wait-past", ateapipb.ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_WAIT_GOLDEN_ACTOR, func(tmpl *ateapipb.ActorTemplate) {
 			tmpl.Status.TakeGoldenSnapshotAt = timestamppb.New(time.Now().Add(-time.Second))
 		}},
@@ -339,8 +448,8 @@ func TestTemplateResyncEnqueues(t *testing.T) {
 
 	// Every non-terminal template enqueues immediately; the future WAIT
 	// template's snapshot delay is handled by the worker, not by resync.
-	if got := r.queue.Len(); got != 3 {
-		t.Errorf("queue.Len() right after resync = %d, want 3", got)
+	if got := r.queue.Len(); got != 4 {
+		t.Errorf("queue.Len() right after resync = %d, want 4", got)
 	}
 }
 
@@ -348,8 +457,8 @@ func TestTemplateReconcilerStartDrivesTemplateToReady(t *testing.T) {
 	ctx := t.Context()
 	persistence := newTestPersistence(t)
 	control := &fakeGoldenControl{}
-	r := NewActorTemplateReconciler(persistence, control)
-	ref := seedTemplate(t, persistence, ateapipb.ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_INITIAL, withReadyz)
+	r := newTestTemplateReconciler(t, persistence, control, testSandboxConfig())
+	ref := seedTemplate(t, persistence, ateapipb.ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_FREEZE_SANDBOX_CONFIG, withReadyz)
 
 	r.Start(ctx)
 
