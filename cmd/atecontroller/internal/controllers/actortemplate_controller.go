@@ -196,7 +196,9 @@ func (r *ActorTemplateReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // goldenSnapshotWarmupFor returns 0 when every container in the template has
 // a readyz probe (so ResumeActor already blocked until the workload reported
 // 200), and the default warmup otherwise. A template with no containers
-// keeps the default — there is nothing to gate on.
+// keeps the default — there is nothing to gate on. Mirrors the substrate
+// ActorTemplate reconciler's function of the same name
+// (cmd/ateapi/internal/controlapi/template_reconciler.go); keep both in sync.
 func goldenSnapshotWarmupFor(at *atev1alpha1.ActorTemplate) time.Duration {
 	containers := at.Spec.Containers
 	if len(containers) == 0 {

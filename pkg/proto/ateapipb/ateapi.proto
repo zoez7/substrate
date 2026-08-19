@@ -419,6 +419,13 @@ message ActorTemplateStatus {
   // sandbox_assets is the referenced SandboxConfig's content frozen at
   // creation time.
   SandboxAssets sandbox_assets = 4;
+
+  // take_golden_snapshot_at is when the golden-actor warmup ends and the
+  // golden snapshot may be taken. Set on the RESUME_GOLDEN_ACTOR ->
+  // WAIT_GOLDEN_ACTOR transition; mirrors the CRD's
+  // status.takeGoldenSnapshotAt. https://github.com/agent-substrate/substrate/blob/43fa6ccbc71d322f76e49b3708c447859830152a/cmd/atecontroller/internal/controllers/actortemplate_controller.go#L44
+  // TODO: delete this?
+  google.protobuf.Timestamp take_golden_snapshot_at = 5;
 }
 
 // SandboxConfig selects the sandbox runtime for an ActorTemplate.

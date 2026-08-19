@@ -91,7 +91,7 @@ func (w *ActorWorkflow) loadActorForPause(ctx context.Context, actorRef resource
 	if err != nil {
 		return nil, nil, err
 	}
-	actorTemplate, err := w.actorTemplateLister.ActorTemplates(actor.GetActorTemplateNamespace()).Get(actor.GetActorTemplateName())
+	actorTemplate, err := resolveActorTemplate(ctx, w.store, w.actorTemplateLister, actor)
 	if err != nil {
 		return nil, nil, fmt.Errorf("while getting ActorTemplate: %w", err)
 	}
@@ -175,12 +175,13 @@ func (w *ActorWorkflow) ensureAteletPaused(ctx context.Context, actorRef resourc
 	// Checkpoint does not carry the sandbox config: atelet uses the version the
 	// actor is currently running (recorded on-node at Run/Restore) and pins it
 	// into the snapshot manifest.
+	templateNamespace, templateName := templateWireRef(actor)
 	req := &ateletpb.CheckpointRequest{
 		TargetAteomUid:         assignment.GetWorkerPodUid(),
 		Atespace:               actor.GetMetadata().GetAtespace(),
 		ActorName:              actor.GetMetadata().GetName(),
-		ActorTemplateNamespace: actor.GetActorTemplateNamespace(),
-		ActorTemplateName:      actor.GetActorTemplateName(),
+		ActorTemplateNamespace: templateNamespace,
+		ActorTemplateName:      templateName,
 		Spec:                   workloadSpec,
 		Type:                   ateletpb.CheckpointType_CHECKPOINT_TYPE_LOCAL,
 		Config: &ateletpb.CheckpointRequest_LocalConfig{

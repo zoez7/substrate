@@ -99,7 +99,7 @@ func (w *ActorWorkflow) loadActorForSuspend(ctx context.Context, actorRef resour
 	if err != nil {
 		return nil, nil, err
 	}
-	actorTemplate, err := w.actorTemplateLister.ActorTemplates(actor.GetActorTemplateNamespace()).Get(actor.GetActorTemplateName())
+	actorTemplate, err := resolveActorTemplate(ctx, w.store, w.actorTemplateLister, actor)
 	if err != nil {
 		return nil, nil, fmt.Errorf("while getting ActorTemplate: %w", err)
 	}
@@ -233,12 +233,13 @@ func (w *ActorWorkflow) ensureAteletSuspended(ctx context.Context, actorRef reso
 	// Checkpoint does not carry the sandbox config: atelet uses the version the
 	// actor is currently running (recorded on-node at Run/Restore) and pins it
 	// into the snapshot manifest.
+	templateNamespace, templateName := templateWireRef(actor)
 	req := &ateletpb.CheckpointRequest{
 		TargetAteomUid:         assignment.GetWorkerPodUid(),
 		Atespace:               actor.GetMetadata().GetAtespace(),
 		ActorName:              actor.GetMetadata().GetName(),
-		ActorTemplateNamespace: actor.GetActorTemplateNamespace(),
-		ActorTemplateName:      actor.GetActorTemplateName(),
+		ActorTemplateNamespace: templateNamespace,
+		ActorTemplateName:      templateName,
 		Spec:                   workloadSpec,
 		Type:                   ateletpb.CheckpointType_CHECKPOINT_TYPE_EXTERNAL,
 		Config: &ateletpb.CheckpointRequest_ExternalConfig{
@@ -289,12 +290,13 @@ func (w *ActorWorkflow) ensurePausedSnapshotUploaded(ctx context.Context, actorR
 		return "", err
 	}
 
+	templateNamespace, templateName := templateWireRef(actor)
 	req := &ateletpb.UploadPausedCheckpointRequest{
 		Atespace:               actor.GetMetadata().GetAtespace(),
 		ActorName:              actor.GetMetadata().GetName(),
 		ActorUid:               actor.GetMetadata().GetUid(),
-		ActorTemplateNamespace: actor.GetActorTemplateNamespace(),
-		ActorTemplateName:      actor.GetActorTemplateName(),
+		ActorTemplateNamespace: templateNamespace,
+		ActorTemplateName:      templateName,
 		LocalSnapshotName:      local.GetSnapshotName(),
 		DestinationSnapshotUri: snapshotURI.String(),
 		// The commit scope, like a running-origin suspend; atelet converts
@@ -385,14 +387,16 @@ func (w *ActorWorkflow) ensureSuspendedFinalized(ctx context.Context, actorRef r
 		if err != nil {
 			return nil, err
 		}
+		templateNamespace, templateName := templateWireRef(latestActor)
 		snapshot := &ateapipb.ActorSnapshot{
 			Metadata: &ateapipb.ResourceMetadata{Atespace: actorRef.Atespace, Name: snapshotName},
 			Status: &ateapipb.ActorSnapshotStatus{
 				SourceActor:            actorRef.ToObjectRef(),
 				SourceActorUid:         latestActor.GetMetadata().GetUid(),
 				SourceActorVersion:     latestActor.GetStatus().GetInProgressSnapshotSourceActorVersion(),
-				ActorTemplateNamespace: latestActor.GetActorTemplateNamespace(),
-				ActorTemplateName:      latestActor.GetActorTemplateName(),
+				ActorTemplateNamespace: templateNamespace,
+				ActorTemplateName:      templateName,
+				ActorTemplate:          latestActor.GetActorTemplate(),
 				ActorTemplateUid:       string(actorTemplate.GetUID()),
 				ContentScope:           toActorSnapshotContentScope(commitSnapshotScope(actorRef.Atespace, actorTemplate)),
 				SnapshotUri:            snapshotURI.String(),

@@ -42,20 +42,19 @@ func (s *Service) CreateActor(ctx context.Context, req *ateapipb.CreateActorRequ
 	in := req.GetActor()
 	// Recorded only after validation, so every operation uniformly measures a
 	// validated request; malformed ones stay visible in rpc.server.call.duration.
+	templateNamespace, templateName := templateWireRef(in)
 	defer func() {
 		s.instruments.recordLifecycleOp(ctx, ateattr.OperationCreate, start, err,
-			ateattr.TemplateNameKey.String(in.GetActorTemplateName()),
-			ateattr.TemplateNamespaceKey.String(in.GetActorTemplateNamespace()),
+			ateattr.TemplateNameKey.String(templateName),
+			ateattr.TemplateNamespaceKey.String(templateNamespace),
 		)
 	}()
-	templateNamespace := in.GetActorTemplateNamespace()
-	templateName := in.GetActorTemplateName()
 
 	setSpanActorRefAttributes(ctx, resources.ActorRefFromActor(in))
 
-	template, err := s.actorTemplateLister.ActorTemplates(templateNamespace).Get(templateName)
+	template, err := resolveActorTemplate(ctx, s.persistence, s.actorTemplateLister, in)
 	if err != nil {
-		if k8serrors.IsNotFound(err) {
+		if k8serrors.IsNotFound(err) || errors.Is(err, store.ErrNotFound) {
 			return nil, status.Errorf(codes.FailedPrecondition, "ActorTemplate %s/%s not found", templateNamespace, templateName)
 		}
 		return nil, fmt.Errorf("while getting ActorTemplate: %w", err)
@@ -92,8 +91,9 @@ func (s *Service) CreateActor(ctx context.Context, req *ateapipb.CreateActorRequ
 			Atespace: atespace,
 			Name:     name,
 		},
-		ActorTemplateNamespace: templateNamespace,
-		ActorTemplateName:      templateName,
+		ActorTemplateNamespace: in.GetActorTemplateNamespace(),
+		ActorTemplateName:      in.GetActorTemplateName(),
+		ActorTemplate:          in.GetActorTemplate(),
 		WorkerSelector:         in.GetWorkerSelector(),
 		SourceSnapshotTag:      in.GetSourceSnapshotTag(),
 		Status: &ateapipb.ActorStatus{
@@ -185,18 +185,30 @@ func validateCreateActorRequest(req *ateapipb.CreateActorRequest) field.ErrorLis
 		errs = append(errs, resources.ValidateResourceName(val, p)...)
 	}
 
-	if val, p := actor.GetActorTemplateNamespace(), actorPath.Child("actor_template_namespace"); val == "" {
-		errs = append(errs, field.Required(p, ""))
-	} else {
-		for _, msg := range content.IsDNS1123Label(val) {
-			errs = append(errs, field.Invalid(p, val, msg))
+	// The template is named by exactly one reference kind: the legacy CRD
+	// namespace/name pair, or the substrate ObjectRef.
+	legacyRef := actor.GetActorTemplateNamespace() != "" || actor.GetActorTemplateName() != ""
+	switch {
+	case legacyRef && actor.GetActorTemplate() != nil:
+		errs = append(errs, field.Forbidden(actorPath.Child("actor_template"), "cannot be combined with actor_template_namespace/actor_template_name"))
+	case actor.GetActorTemplate() != nil:
+		errs = append(errs, resources.ValidateObjectRef(actor.GetActorTemplate(), actorPath.Child("actor_template"))...)
+	case !legacyRef:
+		errs = append(errs, field.Required(actorPath.Child("actor_template"), "one of actor_template or actor_template_namespace/actor_template_name is required"))
+	default:
+		if val, p := actor.GetActorTemplateNamespace(), actorPath.Child("actor_template_namespace"); val == "" {
+			errs = append(errs, field.Required(p, ""))
+		} else {
+			for _, msg := range content.IsDNS1123Label(val) {
+				errs = append(errs, field.Invalid(p, val, msg))
+			}
 		}
-	}
-	if val, p := actor.GetActorTemplateName(), actorPath.Child("actor_template_name"); val == "" {
-		errs = append(errs, field.Required(p, ""))
-	} else {
-		for _, msg := range content.IsDNS1123Subdomain(val) {
-			errs = append(errs, field.Invalid(p, val, msg))
+		if val, p := actor.GetActorTemplateName(), actorPath.Child("actor_template_name"); val == "" {
+			errs = append(errs, field.Required(p, ""))
+		} else {
+			for _, msg := range content.IsDNS1123Subdomain(val) {
+				errs = append(errs, field.Invalid(p, val, msg))
+			}
 		}
 	}
 
@@ -335,9 +347,10 @@ func (s *Service) DeleteActor(ctx context.Context, req *ateapipb.DeleteActorRequ
 	defer func() {
 		var attrs []attribute.KeyValue
 		if deleted != nil {
+			templateNamespace, templateName := templateWireRef(deleted)
 			attrs = append(attrs,
-				ateattr.TemplateNameKey.String(deleted.GetActorTemplateName()),
-				ateattr.TemplateNamespaceKey.String(deleted.GetActorTemplateNamespace()),
+				ateattr.TemplateNameKey.String(templateName),
+				ateattr.TemplateNamespaceKey.String(templateNamespace),
 			)
 		}
 		s.instruments.recordLifecycleOp(ctx, ateattr.OperationDelete, start, err, attrs...)

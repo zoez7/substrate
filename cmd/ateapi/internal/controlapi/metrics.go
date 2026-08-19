@@ -182,9 +182,10 @@ func (i *Instruments) recordLifecycleOp(ctx context.Context, op string, start ti
 // combined with the template's golden state from a plain one of the same kind.
 // The pool keys are set together or not at all; see ateattr.WorkerPoolAttributes.
 func lifecycleOpAttrs(actor *ateapipb.Actor, template *atev1alpha1.ActorTemplate, snapshotKind, snapshotScope string) []attribute.KeyValue {
+	templateNamespace, templateName := templateWireRef(actor)
 	attrs := []attribute.KeyValue{
-		ateattr.TemplateNameKey.String(actor.GetActorTemplateName()),
-		ateattr.TemplateNamespaceKey.String(actor.GetActorTemplateNamespace()),
+		ateattr.TemplateNameKey.String(templateName),
+		ateattr.TemplateNamespaceKey.String(templateNamespace),
 	}
 	ass := actor.GetStatus().GetWorkerAssignment()
 	attrs = append(attrs, ateattr.WorkerPoolAttributes(ass.GetWorkerNamespace(), ass.GetWorkerPool())...)

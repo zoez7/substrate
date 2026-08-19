@@ -344,6 +344,15 @@ func runActorContractTests(t *testing.T, setup func(t *testing.T) store.Interfac
 		} else if errors.Is(err, store.ErrVersionConflict) || errors.Is(err, store.ErrNotFound) {
 			t.Errorf("expected a plain immutable-field error, got sentinel %v", err)
 		}
+
+		if _, err := s.UpdateActor(ctx, resources.ActorRefFromActor(created), func(dbActor *ateapipb.Actor) error {
+			dbActor.ActorTemplate = &ateapipb.ObjectRef{Atespace: testAtespace, Name: "other-template"}
+			return nil
+		}); err == nil {
+			t.Errorf("expected error updating actor_template, got nil")
+		} else if errors.Is(err, store.ErrVersionConflict) || errors.Is(err, store.ErrNotFound) {
+			t.Errorf("expected a plain immutable-field error, got sentinel %v", err)
+		}
 	})
 
 	t.Run("UpdateActor_MutateError", func(t *testing.T) {
@@ -631,6 +640,54 @@ func runActorTemplateContractTests(t *testing.T, setup func(t *testing.T) store.
 
 		if _, err := s.DeleteActorTemplate(ctx, templateRef); err != nil {
 			t.Fatalf("DeleteActorTemplate failed: %v", err)
+		}
+	})
+
+	t.Run("UpdateActorTemplate_Status", func(t *testing.T) {
+		s := setup(t)
+		ctx := context.Background()
+		mustCreateAtespace(t, s, "team-a")
+
+		created, err := s.CreateActorTemplate(ctx, newTestActorTemplate("team-a", "tmpl-a"))
+		if err != nil {
+			t.Fatalf("CreateActorTemplate failed: %v", err)
+		}
+		templateRef := resources.ActorTemplateRef{Atespace: "team-a", Name: "tmpl-a"}
+
+		wantStatus := &ateapipb.ActorTemplateStatus{
+			Phase:                ateapipb.ActorTemplatePhase_ACTOR_TEMPLATE_PHASE_READY,
+			GoldenSnapshot:       &ateapipb.ObjectRef{Atespace: "ate-golden", Name: "golden-1"},
+			TakeGoldenSnapshotAt: timestamppb.New(time.Unix(1700000000, 0)),
+		}
+		updated, err := s.UpdateActorTemplate(ctx, templateRef, func(dbTemplate *ateapipb.ActorTemplate) error {
+			dbTemplate.Status = proto.Clone(wantStatus).(*ateapipb.ActorTemplateStatus)
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("UpdateActorTemplate failed: %v", err)
+		}
+		if got, want := updated.GetMetadata().GetVersion(), created.GetMetadata().GetVersion()+1; got != want {
+			t.Errorf("updated version = %d, want %d", got, want)
+		}
+		stored, err := s.GetActorTemplate(ctx, templateRef)
+		if err != nil {
+			t.Fatalf("GetActorTemplate failed: %v", err)
+		}
+		if diff := cmp.Diff(wantStatus, stored.GetStatus(), protocmp.Transform()); diff != "" {
+			t.Errorf("stored status mismatch (-want +got):\n%s", diff)
+		}
+
+		if _, err := s.UpdateActorTemplate(ctx, templateRef, func(dbTemplate *ateapipb.ActorTemplate) error {
+			dbTemplate.Metadata.Name = "other-name"
+			return nil
+		}); err == nil {
+			t.Errorf("expected error updating metadata.name, got nil")
+		}
+
+		if _, err := s.UpdateActorTemplate(ctx, resources.ActorTemplateRef{Atespace: "team-a", Name: "missing"}, func(dbTemplate *ateapipb.ActorTemplate) error {
+			return nil
+		}); !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("UpdateActorTemplate on missing template = %v, want ErrNotFound", err)
 		}
 	})
 

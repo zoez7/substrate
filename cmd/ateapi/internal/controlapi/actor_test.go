@@ -87,6 +87,37 @@ func TestValidateCreateActorRequest(t *testing.T) {
 		validActor(func(a *ateapipb.Actor) { a.ActorTemplateName = "invalid value" }),
 		field.ErrorList{field.Invalid(field.NewPath("actor", "actor_template_name"), "invalid value", "")},
 	}, {
+		"missing both template references",
+		validActor(func(a *ateapipb.Actor) { a.ActorTemplateNamespace, a.ActorTemplateName = "", "" }),
+		field.ErrorList{field.Required(field.NewPath("actor", "actor_template"), "")},
+	}, {
+		"both template references",
+		validActor(func(a *ateapipb.Actor) {
+			a.ActorTemplate = &ateapipb.ObjectRef{Atespace: "ns1", Name: "tmpl1"}
+		}),
+		field.ErrorList{field.Forbidden(field.NewPath("actor", "actor_template"), "")},
+	}, {
+		"valid substrate template reference",
+		validActor(func(a *ateapipb.Actor) {
+			a.ActorTemplateNamespace, a.ActorTemplateName = "", ""
+			a.ActorTemplate = &ateapipb.ObjectRef{Atespace: "ns1", Name: "tmpl1"}
+		}),
+		nil,
+	}, {
+		"substrate template reference missing name",
+		validActor(func(a *ateapipb.Actor) {
+			a.ActorTemplateNamespace, a.ActorTemplateName = "", ""
+			a.ActorTemplate = &ateapipb.ObjectRef{Atespace: "ns1"}
+		}),
+		field.ErrorList{field.Required(field.NewPath("actor", "actor_template", "name"), "")},
+	}, {
+		"substrate template reference invalid atespace",
+		validActor(func(a *ateapipb.Actor) {
+			a.ActorTemplateNamespace, a.ActorTemplateName = "", ""
+			a.ActorTemplate = &ateapipb.ObjectRef{Atespace: "NS1", Name: "tmpl1"}
+		}),
+		field.ErrorList{field.Invalid(field.NewPath("actor", "actor_template", "atespace"), "NS1", "")},
+	}, {
 		"worker_selector with nil match_labels",
 		validActor(func(a *ateapipb.Actor) { a.WorkerSelector = &ateapipb.Selector{} }),
 		nil,
@@ -125,6 +156,51 @@ func TestValidateCreateActorRequest(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			assertValidateErr(t, validateCreateActorRequest(tt.req), tt.want)
 		})
+	}
+}
+
+// TestCreateActor_SubstrateTemplateRef creates an actor referencing a
+// substrate ActorTemplate by ObjectRef instead of the legacy CRD pair.
+func TestCreateActor_SubstrateTemplateRef(t *testing.T) {
+	persistence := newTestPersistence(t)
+	svc := &Service{persistence: persistence}
+	ctx := context.Background()
+
+	if _, err := persistence.CreateAtespace(ctx, &ateapipb.Atespace{Metadata: &ateapipb.ResourceMetadata{Name: "ns1"}}); err != nil {
+		t.Fatalf("CreateAtespace failed: %v", err)
+	}
+	if _, err := svc.CreateActorTemplate(ctx, &ateapipb.CreateActorTemplateRequest{
+		ActorTemplate: validActorTemplate(),
+	}); err != nil {
+		t.Fatalf("CreateActorTemplate: %v", err)
+	}
+
+	templateRef := &ateapipb.ObjectRef{Atespace: "ns1", Name: "tmpl-a"}
+	created, err := svc.CreateActor(ctx, &ateapipb.CreateActorRequest{
+		Actor: &ateapipb.Actor{
+			Metadata:      &ateapipb.ResourceMetadata{Atespace: "ns1", Name: "sub-actor"},
+			ActorTemplate: templateRef,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateActor: %v", err)
+	}
+	if diff := cmp.Diff(templateRef, created.GetActorTemplate(), protocmp.Transform()); diff != "" {
+		t.Errorf("stored actor_template mismatch (-want +got):\n%s", diff)
+	}
+	if created.GetActorTemplateNamespace() != "" || created.GetActorTemplateName() != "" {
+		t.Errorf("legacy template fields = (%q, %q), want empty for a substrate-ref actor",
+			created.GetActorTemplateNamespace(), created.GetActorTemplateName())
+	}
+
+	_, err = svc.CreateActor(ctx, &ateapipb.CreateActorRequest{
+		Actor: &ateapipb.Actor{
+			Metadata:      &ateapipb.ResourceMetadata{Atespace: "ns1", Name: "sub-actor-2"},
+			ActorTemplate: &ateapipb.ObjectRef{Atespace: "ns1", Name: "missing"},
+		},
+	})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("CreateActor with missing template = %v, want FailedPrecondition", status.Code(err))
 	}
 }
 

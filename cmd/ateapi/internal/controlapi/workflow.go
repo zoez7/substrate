@@ -119,6 +119,7 @@ type actorWorkflowStore interface {
 	UpdateWorker(ctx context.Context, worker *ateapipb.Worker, expectedVersion int64) error
 	GetActorSnapshot(ctx context.Context, atespace, name string) (*ateapipb.ActorSnapshot, error)
 	CreateActorSnapshot(ctx context.Context, snapshot *ateapipb.ActorSnapshot) (*ateapipb.ActorSnapshot, error)
+	GetActorTemplate(ctx context.Context, templateRef resources.ActorTemplateRef) (*ateapipb.ActorTemplate, error)
 	AcquireLock(ctx context.Context, key string) (*store.Lock, error)
 }
 

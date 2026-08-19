@@ -1013,6 +1013,9 @@ func validateUpdateActorMutation(storedActor, mutatedActor *ateapipb.Actor) erro
 	if stored, mutated := storedActor.GetActorTemplateName(), mutatedActor.GetActorTemplateName(); stored != mutated {
 		return fmt.Errorf("actor_template_name is immutable: mutation changed it from %q to %q", stored, mutated)
 	}
+	if stored, mutated := storedActor.GetActorTemplate(), mutatedActor.GetActorTemplate(); !proto.Equal(stored, mutated) {
+		return fmt.Errorf("actor_template is immutable: mutation changed it from %v to %v", stored, mutated)
+	}
 	return nil
 }
 
