@@ -34,9 +34,10 @@ const errorDomain = "substrate.dev"
 
 // Reason is the AIP-193 ErrorInfo.Reason: a bounded, UPPER_SNAKE_CASE enum of
 // failure causes the control plane can classify on. A Reason is also an error:
-// source layers tag failures with fmt.Errorf("%w: ...", ReasonX, err), and
-// each RPC boundary claims the Reasons it treats as terminal (CrashIfReason);
-// untagged errors stay retriable.
+// source layers tag failures with fmt.Errorf("%w: ...", ReasonX, err), each RPC
+// boundary claims the Reasons it treats as retriable (errors.Is +
+// NewRetriableError) and surfaces the rest on the wire (AttachReason); errors
+// not proven retriable crash the actor (ActorRetryAllowed).
 type Reason string
 
 // Error makes a Reason wrappable with %w and matchable with errors.Is/As.
@@ -60,6 +61,20 @@ const (
 	// its state is unrecoverable.
 	ReasonLocalSnapshotGone Reason = "LOCAL_SNAPSHOT_GONE"
 
+	// ReasonObjectStorageUnavailable marks an object-storage failure that the
+	// storage client's own retry predicate classifies as transient (connection
+	// trouble, 408/429/5xx) — distinct from FAILED_GET_EXTERNAL_OBJECT, which
+	// means the object is definitively gone. Deterministic failures (403, 400)
+	// never carry it. Boundaries claim it (errors.Is + NewRetriableError) to
+	// exempt retry-safe operations from the crash default.
+	ReasonObjectStorageUnavailable Reason = "OBJECT_STORAGE_UNAVAILABLE"
+
+	// ReasonImageRegistryUnavailable is OBJECT_STORAGE_UNAVAILABLE's twin for
+	// image pulls: tagged iff the registry client's own classification calls
+	// the failure temporary (429, 5xx, network timeout). Deterministic pull
+	// failures (401/403/404, bad reference) never carry it.
+	ReasonImageRegistryUnavailable Reason = "IMAGE_REGISTRY_UNAVAILABLE"
+
 	// Control-plane failure reasons for ate.actor.crashes metric.
 	ReasonCorruptedAssignment Reason = "CORRUPTED_ASSIGNMENT"
 	ReasonWorkerReassigned    Reason = "WORKER_REASSIGNED"
@@ -77,29 +92,31 @@ var AllReasons = []Reason{
 	ReasonFailedGetExternalObject,
 	ReasonInvalidContainerConfig,
 	ReasonLocalSnapshotGone,
+	ReasonObjectStorageUnavailable,
+	ReasonImageRegistryUnavailable,
 	ReasonCorruptedAssignment,
 	ReasonWorkerReassigned,
 	ReasonWorkerPodGone,
 	ReasonUnknown,
 }
 
-// MetadataKeyActorCrashed marks (in ErrorInfo.Metadata) a failure that requires
-// the control plane to crash the actor.
-const MetadataKeyActorCrashed = "actorCrashed"
+// MetadataKeyActorRetriable marks (in ErrorInfo.Metadata) a failure the control
+// plane may retry instead of crashing the actor. Errors crash the actor by
+// default; this directive is the explicit exemption.
+const MetadataKeyActorRetriable = "actorRetriable"
 
-// ActorCrashedMetadata returns the AIP-193 metadata marking a failure as
-// requiring the actor to be crashed. The control plane reads it via
-// ActorCrashRequested.
-func ActorCrashedMetadata() map[string]string {
-	return map[string]string{MetadataKeyActorCrashed: "true"}
+// ActorRetriableMetadata returns the AIP-193 metadata exempting a failure from
+// the crash-by-default rule. The control plane reads it via ActorRetryAllowed.
+func ActorRetriableMetadata() map[string]string {
+	return map[string]string{MetadataKeyActorRetriable: "true"}
 }
 
 // NewGRPCError builds an internal gRPC status error per AIP-193
 // (https://google.aip.dev/193#status-message), with a google.rpc.ErrorInfo detail
 // carrying the given Reason ("UNSET" when empty).
-// metadata carries additional structured directives such as ActorCrashedMetadata(),
-// which the control plane reads via ActorCrashRequested to decide whether to crash
-// the actor.
+// metadata carries additional structured directives such as ActorRetriableMetadata(),
+// which the control plane reads via ActorRetryAllowed to decide whether the
+// failure is exempt from the crash default.
 func NewGRPCError(ctx context.Context, grpcCode codes.Code, reason Reason, metadata map[string]string, err error) error {
 	// Validate the input parameters.
 	if err == nil || grpcCode == codes.OK {
@@ -127,29 +144,70 @@ func NewGRPCError(ctx context.Context, grpcCode codes.Code, reason Reason, metad
 	return st.Err()
 }
 
-// CrashIfReason sets the err to a DataLoss gRPC status with the actor-crash
-// directive iff its chain carries one of the given Reasons; any other error is
-// returned unchanged. Claiming is per call site: the same tagged failure may
-// crash the actor in one RPC and stay retriable in another.
-func CrashIfReason(ctx context.Context, err error, reasons ...Reason) error {
-	r, ok := errors.AsType[Reason](err)
-	if !ok || !slices.Contains(reasons, r) {
-		return err
-	}
-	return NewGRPCError(ctx, codes.DataLoss, r, ActorCrashedMetadata(), err)
+// NewRetriableError builds a gRPC status error carrying the actor-retriable
+// directive: the failure is exempt from the crash-by-default rule and the
+// actor stays in its in-progress state for a re-entered workflow.
+// Claiming is per call site: the same tagged failure may be retriable in one
+// RPC and crash the actor in another.
+func NewRetriableError(ctx context.Context, grpcCode codes.Code, reason Reason, err error) error {
+	return NewGRPCError(ctx, grpcCode, reason, ActorRetriableMetadata(), err)
 }
 
-// ActorCrashRequested reports whether any ErrorInfo carried by err has the
-// actorCrashed=true directive, i.e. the failure requires the control plane to
-// crash the actor.
-func ActorCrashRequested(err error) bool {
+// AttachReason promotes a Reason wrapped in err's chain into a DataLoss gRPC
+// status with an ErrorInfo detail, so the classification survives the RPC
+// boundary (the server interceptor masks non-status errors as Internal,
+// dropping the tag). Errors that already are gRPC statuses — classified at a
+// lower boundary, or raised by a downstream RPC — and untagged errors pass
+// through unchanged. It carries no directive: whether the actor crashes is
+// the control plane's default for non-retriable errors.
+func AttachReason(ctx context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	if _, ok := status.FromError(err); ok {
+		return err
+	}
+	r, ok := errors.AsType[Reason](err)
+	if !ok || !IsValidReason(string(r)) {
+		return err
+	}
+	return NewGRPCError(ctx, codes.DataLoss, r, nil, err)
+}
+
+// transientCodes are the gRPC codes that are canonically safe to retry
+// (AIP-194): the operation either did not run or can be re-attempted by the
+// idempotent, re-entrant workflows. Any other code crashes the actor unless
+// the error carries the actor-retriable directive.
+var transientCodes = []codes.Code{
+	codes.Unavailable,
+	codes.Aborted,
+	codes.ResourceExhausted,
+	codes.DeadlineExceeded,
+	codes.Canceled,
+}
+
+// ActorRetryAllowed reports whether err is exempt from the crash-by-default
+// rule: it carries the actorRetriable=true directive, a canonically transient
+// gRPC code, or is a context cancellation/timeout that never left the caller.
+func ActorRetryAllowed(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Local context errors are not gRPC statuses but are always retriable: the
+	// operation was abandoned by the caller, not failed by the callee.
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
 	st, ok := status.FromError(err)
 	if !ok {
 		return false
 	}
+	if slices.Contains(transientCodes, st.Code()) {
+		return true
+	}
 	for _, d := range st.Details() {
 		if info, ok := d.(*epb.ErrorInfo); ok {
-			if info.GetMetadata()[MetadataKeyActorCrashed] == "true" {
+			if info.GetMetadata()[MetadataKeyActorRetriable] == "true" {
 				return true
 			}
 		}

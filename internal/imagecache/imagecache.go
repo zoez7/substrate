@@ -65,11 +65,13 @@ import (
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 	"go.opentelemetry.io/otel/metric"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/singleflight"
 
 	"github.com/agent-substrate/substrate/internal/ateattr"
+	"github.com/agent-substrate/substrate/internal/ateerrors"
 )
 
 const (
@@ -331,6 +333,7 @@ func (s *Store) EnsureImage(ctx context.Context, ref string) (_ *Image, err erro
 	// reclassifies a failure onto its own outcome.
 	outcome := ateattr.ImageCacheOutcomeMiss
 	defer func() { s.recordRequest(ctx, outcome, err) }()
+	defer func() { err = classifyRegistryErr(err) }()
 
 	parsedRef, err := s.parseRef(ref)
 	if err != nil {
@@ -376,6 +379,25 @@ func (s *Store) EnsureImage(ctx context.Context, ref string) (_ *Image, err erro
 		return nil, err
 	}
 	return v.(*Image), nil
+}
+
+// classifyRegistryErr tags err transient iff the registry client's own
+// classification calls it temporary (transport.Error.Temporary: 429, 5xx) or
+// it is a network timeout. Deterministic pull failures (401/403/404, bad
+// reference) stay untagged and crash the actor by default.
+func classifyRegistryErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	var terr *transport.Error
+	if errors.As(err, &terr) && terr.Temporary() {
+		return fmt.Errorf("%w: %w", ateerrors.ReasonImageRegistryUnavailable, err)
+	}
+	var nerr net.Error
+	if errors.As(err, &nerr) && nerr.Timeout() {
+		return fmt.Errorf("%w: %w", ateerrors.ReasonImageRegistryUnavailable, err)
+	}
+	return err
 }
 
 // cachedImageHit is the hit side of the hitMu contract: it verifies the

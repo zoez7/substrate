@@ -38,9 +38,20 @@ func (g *gcsClient) GetObject(ctx context.Context, bucket, object string) (io.Re
 		if errors.Is(err, storage.ErrObjectNotExist) || errors.Is(err, storage.ErrBucketNotExist) {
 			return nil, fmt.Errorf("%w: Bucket:%q, Object:%q", ateerrors.ReasonFailedGetExternalObject, bucket, object)
 		}
-		return nil, err
+		return nil, classifyGCSErr(fmt.Errorf("while reading Bucket:%q, Object:%q: %w", bucket, object, err))
 	}
 	return rc, nil
+}
+
+// classifyGCSErr tags err transient iff the storage client's own retry
+// predicate would retry it (connection trouble, 408/429/5xx, unexpected EOF).
+// Deterministic failures (403, 400, ...) stay untagged and crash the actor by
+// default.
+func classifyGCSErr(err error) error {
+	if storage.ShouldRetry(err) {
+		return fmt.Errorf("%w: %w", ateerrors.ReasonObjectStorageUnavailable, err)
+	}
+	return err
 }
 
 // supportsStreamingPut is the streamingPutter marker: the GCS client's PutObject
@@ -86,7 +97,16 @@ func (g *gcsClient) PutObject(ctx context.Context, bucket, object string, reader
 	_, copyErr := io.Copy(wc, reader)
 	closeErr := wc.Close()
 	if err := errors.Join(copyErr, closeErr); err != nil {
-		return fmt.Errorf("while putting GCS object: %w", err)
+		wrapped := fmt.Errorf("while putting GCS object: %w", err)
+		// Judge each failure on its own: one deterministic branch (e.g. a
+		// local read error in copyErr) must crash even if the other branch
+		// is retryable.
+		for _, e := range []error{copyErr, closeErr} {
+			if e != nil && !storage.ShouldRetry(e) {
+				return wrapped
+			}
+		}
+		return fmt.Errorf("%w: %w", ateerrors.ReasonObjectStorageUnavailable, wrapped)
 	}
 	return nil
 }

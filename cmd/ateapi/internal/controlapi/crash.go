@@ -29,26 +29,32 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// maybeCrashActor inspects err returned by an atelet RPC and crashes the actor
-// if err carries the actorCrashed=true metadata directive.
-func maybeCrashActor(ctx context.Context, st crashActorStore, actorRef resources.ActorRef, err error, wrapMsg, opName string) error {
+// crashUnlessRetriable inspects err returned by an atelet RPC and crashes the
+// actor unless the error is provably transient: it carries the
+// actorRetriable=true directive or a canonically retryable gRPC code
+// (ateerrors.ActorRetryAllowed). Unclassified errors crash — an actor must
+// never sit in a transitional state on a failure nobody claimed as retriable.
+func crashUnlessRetriable(ctx context.Context, st crashActorStore, actorRef resources.ActorRef, err error, wrapMsg, opName string) error {
 	if err == nil {
 		return nil
 	}
 
-	if ateerrors.ActorCrashRequested(err) {
-		slog.ErrorContext(ctx, "Setting Actor to crashed due to error", slog.Any("error", err))
-		// Extract AIP-193 ErrorInfo reason enum from the RPC error detail. If unclassified
-		// or unlisted, default to ateattr.ReasonUnknown to protect metric low-cardinality.
-		reason := ateerrors.ExtractReason(err)
-
-		if cerr := crashActor(ctx, st, actorRef, opName, reason); cerr != nil {
-			slog.ErrorContext(ctx, "Failed to crash actor", slog.Any("cerr", cerr))
-			return cerr
-		}
-		return status.Errorf(codes.DataLoss, "actor %s crashed", actorRef)
+	if ateerrors.ActorRetryAllowed(err) {
+		// The actor stays in its in-progress state; the re-entrant workflow
+		// fast-forwards past completed steps on the next attempt.
+		return fmt.Errorf("%s: %w", wrapMsg, err)
 	}
-	return fmt.Errorf("%s: %w", wrapMsg, err)
+
+	slog.ErrorContext(ctx, "Setting Actor to crashed due to error", slog.Any("error", err))
+	// Extract AIP-193 ErrorInfo reason enum from the RPC error detail. If unclassified
+	// or unlisted, default to ateattr.ReasonUnknown to protect metric low-cardinality.
+	reason := ateerrors.ExtractReason(err)
+
+	if cerr := crashActor(ctx, st, actorRef, opName, reason); cerr != nil {
+		slog.ErrorContext(ctx, "Failed to crash actor", slog.Any("cerr", cerr))
+		return cerr
+	}
+	return status.Errorf(codes.DataLoss, "actor %s crashed", actorRef)
 }
 
 // crashActor moves the actor to CRASHED state and frees the worker it was

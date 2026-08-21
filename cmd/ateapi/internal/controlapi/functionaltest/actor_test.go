@@ -1911,13 +1911,57 @@ func TestResumeActor_RequiresBothSelectorsToMatch(t *testing.T) {
 	}
 }
 
+// TestResumeActor_UnclassifiedErrorCrashes pins the crash-by-default rule at
+// the workflow seam: an atelet failure that is neither marked retriable nor
+// carrying a transient gRPC code moves the actor to CRASHED and releases its
+// worker, instead of leaving it parked in RESUMING.
+func TestResumeActor_UnclassifiedErrorCrashes(t *testing.T) {
+	ns := namespaceForTest("ns-resume-unclassified-crash")
+	tc := setupTest(t, ns)
+	defer tc.cleanup()
+
+	createTemplate(t, tc, ns)
+	createWorkerPod(t, tc, ns, "worker-1", "node1", "pool1")
+
+	name := "id1"
+	if _, err := tc.client.CreateActor(context.Background(), &ateapipb.CreateActorRequest{Actor: &ateapipb.Actor{
+		Metadata:               &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: name},
+		ActorTemplateNamespace: ns,
+		ActorTemplateName:      "tmpl1",
+	}}); err != nil {
+		t.Fatalf("CreateActor failed: %v", err)
+	}
+
+	tc.fakeAtelet.FailRestore = status.Error(codes.Internal, "unclassified atelet failure")
+	_, err := tc.client.ResumeActor(context.Background(), &ateapipb.ResumeActorRequest{
+		Actor: &ateapipb.ObjectRef{Atespace: testAtespace, Name: name},
+	})
+	if err == nil {
+		t.Fatalf("expected ResumeActor to fail due to atelet error")
+	}
+	if got := status.Code(err); got != codes.DataLoss {
+		t.Errorf("ResumeActor error code = %v, want %v", got, codes.DataLoss)
+	}
+
+	actor, err := tc.persistence.GetActor(context.Background(), resources.ActorRef{Atespace: testAtespace, Name: name})
+	if err != nil {
+		t.Fatalf("failed to get actor from store: %v", err)
+	}
+	if got := actor.GetStatus().GetState(); got != ateapipb.ActorState_ACTOR_STATE_CRASHED {
+		t.Errorf("expected state CRASHED, got %v", got)
+	}
+	if actor.GetStatus().GetWorkerAssignment() != nil {
+		t.Errorf("expected worker assignment cleared, got %v", actor.GetStatus().GetWorkerAssignment())
+	}
+}
+
 // TestResumeActor_Reentrancy tests the failure recovery and re-entrancy of ResumeActor.
 // Workflow:
 // 1. Creates a mock ActorTemplate.
 // 2. Creates a mock Atelet Pod and a mock Worker Pod.
 // 3. Waits for the WorkerPoolSyncer to mirror the worker to store.
 // 4. Creates an actor in SUSPENDED state.
-// 5. Configures fake Atelet to FAIL on Restore.
+// 5. Configures fake Atelet to FAIL on Restore with a retriable (transient) error.
 // 6. Calls ResumeActor and verifies it fails, but actor state becomes RESUMING.
 // 7. Configures fake Atelet to SUCCEED on Restore.
 // 8. Calls ResumeActor again and verifies it succeeds and actor state becomes RUNNING.
@@ -1942,7 +1986,7 @@ func TestResumeActor_Reentrancy(t *testing.T) {
 	}
 
 	// STEP 1: Make Atelet FAIL on Restore!
-	tc.fakeAtelet.FailRestore = fmt.Errorf("mock atelet failure")
+	tc.fakeAtelet.FailRestore = status.Error(codes.Unavailable, "mock atelet transient failure")
 
 	_, err = tc.client.ResumeActor(context.Background(), &ateapipb.ResumeActorRequest{
 		Actor: &ateapipb.ObjectRef{Atespace: testAtespace, Name: name},
@@ -2345,7 +2389,7 @@ func TestResumeActor_ReleasesStaleWorkerWhenPoolBecomesIneligible(t *testing.T) 
 		t.Fatalf("CreateActor failed: %v", err)
 	}
 
-	tc.fakeAtelet.FailRun = fmt.Errorf("mock atelet failure")
+	tc.fakeAtelet.FailRun = status.Error(codes.Unavailable, "mock atelet transient failure")
 	_, err = tc.client.ResumeActor(context.Background(), &ateapipb.ResumeActorRequest{Actor: &ateapipb.ObjectRef{Atespace: testAtespace, Name: name}})
 	if err == nil {
 		t.Fatalf("expected first ResumeActor (onto worker-a) to fail")
@@ -2436,7 +2480,7 @@ func TestResumeActor_CrashesIfAssignedWorkerIsDraining(t *testing.T) {
 
 	// First resume fails after a worker is assigned, leaving the actor bound to
 	// that worker from a prior attempt.
-	tc.fakeAtelet.FailRestore = fmt.Errorf("mock atelet failure")
+	tc.fakeAtelet.FailRestore = status.Error(codes.Unavailable, "mock atelet transient failure")
 	if _, err := tc.client.ResumeActor(context.Background(), &ateapipb.ResumeActorRequest{Actor: &ateapipb.ObjectRef{Atespace: testAtespace, Name: id}}); err == nil {
 		t.Fatalf("expected first ResumeActor to fail")
 	}
@@ -2668,7 +2712,7 @@ func TestResumeActor_DanglingWorker(t *testing.T) {
 	}
 
 	// 2. Configure fake Atelet to FAIL on Restore!
-	tc.fakeAtelet.FailRestore = fmt.Errorf("mock atelet failure")
+	tc.fakeAtelet.FailRestore = status.Error(codes.Unavailable, "mock atelet transient failure")
 
 	// 3. Call ResumeActor -> Expect failure
 	_, err = tc.client.ResumeActor(context.Background(), &ateapipb.ResumeActorRequest{

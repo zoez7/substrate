@@ -57,11 +57,11 @@ func TestNewGRPCError(t *testing.T) {
 		wantMetadata map[string]string
 	}{
 		{
-			name:         "actor crashed metadata",
+			name:         "actor retriable metadata",
 			reason:       ReasonFaileSaveSnapshot,
-			metadata:     ActorCrashedMetadata(),
+			metadata:     ActorRetriableMetadata(),
 			wantReason:   string(ReasonFaileSaveSnapshot),
-			wantMetadata: map[string]string{MetadataKeyActorCrashed: "true"},
+			wantMetadata: map[string]string{MetadataKeyActorRetriable: "true"},
 		},
 		{
 			name:         "no metadata",
@@ -143,15 +143,15 @@ func TestNewGRPCErrorInvalidInput(t *testing.T) {
 				t.Fatalf("NewGRPCError(%v, nil, %v) = nil, want a validation error", tt.grpcCode, tt.err)
 			}
 			// The validation error is a plain error, not a gRPC status, and it must
-			// not carry a classifiable Reason or crash directive.
+			// not carry a classifiable Reason or retriable directive.
 			if _, ok := status.FromError(err); ok {
 				t.Errorf("NewGRPCError(...) = %v; want a plain error, not a gRPC status", err)
 			}
 			if got := errorReasonsFromStatus(err); len(got) != 0 {
 				t.Errorf("errorReasonsFromStatus() = %q, want no reasons", got)
 			}
-			if ActorCrashRequested(err) {
-				t.Errorf("ActorCrashRequested(%v) = true, want false", err)
+			if ActorRetryAllowed(err) {
+				t.Errorf("ActorRetryAllowed(%v) = true, want false", err)
 			}
 		})
 	}
@@ -177,53 +177,73 @@ func TestReasonTagging(t *testing.T) {
 	}
 }
 
-// TestCrashIfReason verifies the boundary rule: an error whose chain carries a
-// Reason the call site explicitly claims escalates to a DataLoss gRPC status
-// with that Reason and the actor-crash directive; anything else — untagged, or
-// tagged with an unclaimed Reason — passes through unchanged.
-func TestCrashIfReason(t *testing.T) {
-	t.Run("claimed reason escalates to DataLoss and crash", func(t *testing.T) {
+// TestNewRetriableError verifies the boundary rule under crash-by-default: a
+// call site that claims a failure as retriable produces a gRPC status with
+// the claimed Reason and the actor-retriable directive.
+func TestNewRetriableError(t *testing.T) {
+	tagged := fmt.Errorf("%w: while fetching manifest: %w", ReasonObjectStorageUnavailable, errors.New("503"))
+	err := NewRetriableError(context.Background(), codes.Unavailable, ReasonObjectStorageUnavailable, tagged)
+
+	st, ok := status.FromError(err)
+	if !ok {
+		t.Fatalf("NewRetriableError(tagged) = %v, want a gRPC status error", err)
+	}
+	if got, want := st.Code(), codes.Unavailable; got != want {
+		t.Errorf("status code = %v, want %v", got, want)
+	}
+	if got := errorReasonsFromStatus(err); !slices.Contains(got, string(ReasonObjectStorageUnavailable)) {
+		t.Errorf("errorReasonsFromStatus() = %q, want it to contain %q", got, ReasonObjectStorageUnavailable)
+	}
+	if !ActorRetryAllowed(err) {
+		t.Errorf("ActorRetryAllowed(%v) = false, want true", err)
+	}
+}
+
+// TestAttachReason verifies that a wrapped Reason is promoted into an
+// ErrorInfo detail so it survives the RPC boundary, without adding any
+// retriable directive, and that already-classified or untagged errors pass
+// through unchanged.
+func TestAttachReason(t *testing.T) {
+	t.Run("tagged error gains ErrorInfo but no exemption", func(t *testing.T) {
 		tagged := fmt.Errorf("%w: while parsing manifest: %w", ReasonInvalidSandboxAsset, errors.New("bad json"))
-		err := CrashIfReason(context.Background(), tagged, ReasonFailedGetExternalObject, ReasonInvalidSandboxAsset)
+		err := AttachReason(context.Background(), tagged)
 
 		st, ok := status.FromError(err)
 		if !ok {
-			t.Fatalf("CrashIfReason(tagged, claimed) = %v, want a gRPC status error", err)
+			t.Fatalf("AttachReason(tagged) = %v, want a gRPC status error", err)
 		}
 		if got, want := st.Code(), codes.DataLoss; got != want {
 			t.Errorf("status code = %v, want %v", got, want)
 		}
-		if got := errorReasonsFromStatus(err); !slices.Contains(got, string(ReasonInvalidSandboxAsset)) {
-			t.Errorf("errorReasonsFromStatus() = %q, want it to contain %q", got, ReasonInvalidSandboxAsset)
+		if got, want := ExtractReason(err), string(ReasonInvalidSandboxAsset); got != want {
+			t.Errorf("ExtractReason(%v) = %q, want %q", err, got, want)
 		}
-		if !ActorCrashRequested(err) {
-			t.Errorf("ActorCrashRequested(%v) = false, want true", err)
-		}
-	})
-
-	t.Run("unclaimed reason passes through unchanged", func(t *testing.T) {
-		// The chain is tagged terminal, but this boundary does not claim that
-		// Reason, so the actor must not crash.
-		tagged := fmt.Errorf("%w: sha256 mismatch: %w", ReasonInvalidObjectURL, errors.New("boom"))
-		got := CrashIfReason(context.Background(), tagged, ReasonInvalidSandboxAsset)
-		if got != tagged {
-			t.Errorf("CrashIfReason(tagged, unclaimed) = %v, want the same error back", got)
-		}
-		if ActorCrashRequested(got) {
-			t.Errorf("ActorCrashRequested(%v) = true, want false", got)
+		if ActorRetryAllowed(err) {
+			t.Errorf("ActorRetryAllowed(%v) = true, want false", err)
 		}
 	})
 
-	t.Run("untagged error passes through unchanged", func(t *testing.T) {
-		plain := errors.New("transient network failure")
-		if got := CrashIfReason(context.Background(), plain, ReasonInvalidSandboxAsset); got != plain {
-			t.Errorf("CrashIfReason(plain) = %v, want the same error back", got)
+	t.Run("existing status error passes through unchanged", func(t *testing.T) {
+		downstream := status.Error(codes.Unavailable, "ateom draining")
+		if got := AttachReason(context.Background(), downstream); got != downstream {
+			t.Errorf("AttachReason(status) = %v, want the same error back", got)
 		}
 	})
 
-	t.Run("nil error returns nil", func(t *testing.T) {
-		if got := CrashIfReason(context.Background(), nil, ReasonInvalidSandboxAsset); got != nil {
-			t.Errorf("CrashIfReason(nil) = %v, want nil", got)
+	t.Run("unlisted reason passes through unchanged", func(t *testing.T) {
+		tagged := fmt.Errorf("%w: boom", Reason("UNLISTED_DYNAMIC_ERROR_STRING"))
+		if got := AttachReason(context.Background(), tagged); got != tagged {
+			t.Errorf("AttachReason(unlisted) = %v, want the same error back", got)
+		}
+	})
+
+	t.Run("untagged and nil pass through", func(t *testing.T) {
+		plain := errors.New("boom")
+		if got := AttachReason(context.Background(), plain); got != plain {
+			t.Errorf("AttachReason(plain) = %v, want the same error back", got)
+		}
+		if got := AttachReason(context.Background(), nil); got != nil {
+			t.Errorf("AttachReason(nil) = %v, want nil", got)
 		}
 	})
 }
@@ -254,7 +274,10 @@ func TestErrorReasonsFromStatus(t *testing.T) {
 	}
 }
 
-func TestActorCrashRequested(t *testing.T) {
+// TestActorRetryAllowed pins down the crash-by-default judgment: only the
+// explicit retriable directive, canonically transient gRPC codes, and local
+// context errors are exempt; everything else crashes the actor.
+func TestActorRetryAllowed(t *testing.T) {
 	tests := []struct {
 		name string
 		err  error
@@ -262,27 +285,39 @@ func TestActorCrashRequested(t *testing.T) {
 	}{
 		{name: "nil error", err: nil, want: false},
 		{name: "plain error without status", err: errors.New("boom"), want: false},
-		{name: "status without error info", err: status.Error(codes.Unavailable, "transient"), want: false},
+		{name: "context canceled", err: fmt.Errorf("while checkpointing: %w", context.Canceled), want: true},
+		{name: "context deadline exceeded", err: context.DeadlineExceeded, want: true},
+		{name: "transient code Unavailable", err: status.Error(codes.Unavailable, "connection refused"), want: true},
+		{name: "transient code Aborted", err: status.Error(codes.Aborted, "conflict"), want: true},
+		{name: "transient code ResourceExhausted", err: status.Error(codes.ResourceExhausted, "quota"), want: true},
+		{name: "transient code DeadlineExceeded", err: status.Error(codes.DeadlineExceeded, "slow"), want: true},
+		{name: "transient code Canceled", err: status.Error(codes.Canceled, "gone"), want: true},
+		{name: "Internal crashes", err: status.Error(codes.Internal, "unclassified ateom failure"), want: false},
+		{name: "Unknown crashes", err: status.Error(codes.Unknown, "boom"), want: false},
+		{name: "DataLoss crashes", err: status.Error(codes.DataLoss, "snapshot gone"), want: false},
+		{name: "NotFound crashes", err: status.Error(codes.NotFound, "no such workload"), want: false},
+		{name: "InvalidArgument crashes", err: status.Error(codes.InvalidArgument, "bad request"), want: false},
+		{name: "FailedPrecondition crashes", err: status.Error(codes.FailedPrecondition, "wrong state"), want: false},
 		{
-			name: "actor crashed metadata",
-			err:  NewGRPCError(context.Background(), codes.DataLoss, ReasonInvalidCheckpointResult, ActorCrashedMetadata(), errors.New("boom")),
+			name: "retriable directive exempts a crash-worthy code",
+			err:  NewRetriableError(context.Background(), codes.Internal, ReasonObjectStorageUnavailable, errors.New("boom")),
 			want: true,
 		},
 		{
-			name: "no metadata",
+			name: "reason without directive does not exempt",
 			err:  NewGRPCError(context.Background(), codes.DataLoss, ReasonInvalidCheckpointResult, nil, errors.New("boom")),
 			want: false,
 		},
 		{
-			name: "metadata without crash key",
+			name: "metadata without retriable key does not exempt",
 			err:  NewGRPCError(context.Background(), codes.DataLoss, ReasonInvalidCheckpointResult, map[string]string{"other": "x"}, errors.New("boom")),
 			want: false,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := ActorCrashRequested(tt.err); got != tt.want {
-				t.Errorf("ActorCrashRequested(%v) = %v, want %v", tt.err, got, tt.want)
+			if got := ActorRetryAllowed(tt.err); got != tt.want {
+				t.Errorf("ActorRetryAllowed(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
 	}

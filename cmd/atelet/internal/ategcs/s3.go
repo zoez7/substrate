@@ -22,6 +22,7 @@ import (
 
 	"github.com/agent-substrate/substrate/internal/ateerrors"
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
@@ -43,7 +44,7 @@ func (s *s3Client) GetObject(ctx context.Context, bucket, object string) (io.Rea
 		if _, ok := errors.AsType[*s3types.NoSuchKey](err); ok {
 			return nil, fmt.Errorf("%w: Failed to get S3 Bucket:%q, Object:%q", ateerrors.ReasonFailedGetExternalObject, bucket, object)
 		}
-		return nil, err
+		return nil, classifyS3Err(fmt.Errorf("while reading S3 Bucket:%q, Object:%q: %w", bucket, object, err))
 	}
 	return output.Body, nil
 }
@@ -54,5 +55,21 @@ func (s *s3Client) PutObject(ctx context.Context, bucket, object string, reader 
 		Key:    aws.String(object),
 		Body:   reader,
 	})
+	if err != nil {
+		return classifyS3Err(fmt.Errorf("while putting S3 object: %w", err))
+	}
+	return nil
+}
+
+// classifyS3Err tags err transient iff the AWS SDK's own standard retryer
+// would retry it (connection trouble, throttling, retryable status codes).
+// Deterministic failures (AccessDenied, malformed requests, ...) stay
+// untagged and crash the actor by default.
+func classifyS3Err(err error) error {
+	for _, r := range retry.DefaultRetryables {
+		if r.IsErrorRetryable(err) == aws.TrueTernary {
+			return fmt.Errorf("%w: %w", ateerrors.ReasonObjectStorageUnavailable, err)
+		}
+	}
 	return err
 }
