@@ -274,7 +274,7 @@ func PrintActorTemplatesTo(out io.Writer, templates []*ateapipb.ActorTemplate, f
 		fmt.Fprintln(w, "ATESPACE\tNAME\tSANDBOX CLASS\tSTATUS\tAGE")
 		for _, t := range templates {
 			status := "Failed"
-			if t.GetStatus().GetGoldenSnapshotStatus().GetGoldenSnapshot() != nil {
+			if gss := t.GetStatus().GetGoldenSnapshotStatus(); len(gss) > 0 && gss[0].GetGoldenSnapshot() != nil {
 				status = "Ready"
 			}
 			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",

@@ -124,8 +124,9 @@ func (s *fakeTemplateStore) AcquireLease(ctx context.Context, _ string) (*store.
 	return store.NewLease(leaseCtx, cancel), nil
 }
 
-// storedStatus returns the persisted status for ref, for assertions.
-func (s *fakeTemplateStore) storedStatus(t *testing.T, ref resources.ActorTemplateRef) *ateapipb.ActorTemplateStatus {
+// storedGoldenStatus returns the persisted golden snapshot status for ref,
+// for assertions.
+func (s *fakeTemplateStore) storedGoldenStatus(t *testing.T, ref resources.ActorTemplateRef) *ateapipb.GoldenSnapshotStatus {
 	t.Helper()
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -133,7 +134,7 @@ func (s *fakeTemplateStore) storedStatus(t *testing.T, ref resources.ActorTempla
 	if !ok {
 		t.Fatalf("template %v not in store", ref)
 	}
-	return proto.Clone(tmpl).(*ateapipb.ActorTemplate).GetStatus()
+	return currentGoldenSnapshotStatus(proto.Clone(tmpl).(*ateapipb.ActorTemplate))
 }
 
 // fakeGoldenControl is a stateful in-memory goldenActorControl: the golden
@@ -266,10 +267,10 @@ func withoutReadyz(tmpl *ateapipb.ActorTemplate) {
 // seededGoldenStatus returns the template's golden snapshot status, allocating
 // it so the with* options below can mutate it.
 func seededGoldenStatus(tmpl *ateapipb.ActorTemplate) *ateapipb.GoldenSnapshotStatus {
-	if tmpl.Status.GoldenSnapshotStatus == nil {
-		tmpl.Status.GoldenSnapshotStatus = &ateapipb.GoldenSnapshotStatus{}
+	if len(tmpl.Status.GoldenSnapshotStatus) == 0 {
+		tmpl.Status.GoldenSnapshotStatus = []*ateapipb.GoldenSnapshotStatus{{}}
 	}
-	return tmpl.Status.GoldenSnapshotStatus
+	return tmpl.Status.GoldenSnapshotStatus[0]
 }
 
 func withSnapshotDeadline(at time.Time) func(*ateapipb.ActorTemplate) {
@@ -517,7 +518,7 @@ func TestReconcileOne(t *testing.T) {
 			if tt.template == nil {
 				return
 			}
-			snapshotStatus := st.storedStatus(t, testTemplateRef).GetGoldenSnapshotStatus()
+			snapshotStatus := st.storedGoldenStatus(t, testTemplateRef)
 			errorMessage := snapshotStatus.GetErrorMessage()
 			if tt.wantFailedReason == "" && tt.wantMessage == "" {
 				if errorMessage != "" {
@@ -570,7 +571,7 @@ func TestReconcileOne_GoldenActorRequests(t *testing.T) {
 	if got := control.suspendReqs[0].GetActor().GetName(); got != testTemplateUID {
 		t.Errorf("suspended actor = %q, want %q", got, testTemplateUID)
 	}
-	if st.storedStatus(t, testTemplateRef).GetGoldenSnapshotStatus().GetTakeGoldenSnapshotAt() == nil {
+	if st.storedGoldenStatus(t, testTemplateRef).GetTakeGoldenSnapshotAt() == nil {
 		t.Error("stored take_golden_snapshot_at is nil, want set")
 	}
 }
@@ -596,7 +597,7 @@ func TestCheckpoint_TerminalStateErrors(t *testing.T) {
 			if err == nil {
 				t.Fatal("checkpoint succeeded, want error for terminal template")
 			}
-			if st.storedStatus(t, testTemplateRef).GetGoldenSnapshotStatus().GetTakeGoldenSnapshotAt() != nil {
+			if st.storedGoldenStatus(t, testTemplateRef).GetTakeGoldenSnapshotAt() != nil {
 				t.Error("take_golden_snapshot_at set, want store unchanged")
 			}
 		})
@@ -622,7 +623,7 @@ func TestCheckpoint_StaleObservationConflicts(t *testing.T) {
 	if !errors.Is(err, store.ErrVersionConflict) {
 		t.Fatalf("checkpoint error = %v, want ErrVersionConflict", err)
 	}
-	if st.storedStatus(t, testTemplateRef).GetGoldenSnapshotStatus().GetTakeGoldenSnapshotAt() != nil {
+	if st.storedGoldenStatus(t, testTemplateRef).GetTakeGoldenSnapshotAt() != nil {
 		t.Error("take_golden_snapshot_at set, want store unchanged")
 	}
 }

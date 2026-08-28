@@ -165,12 +165,12 @@ func TestActorTemplateFromCRD(t *testing.T) {
 			{Name: "memory", Quantity: "512Mi"},
 		}},
 		Status: &ateapipb.ActorTemplateStatus{
-			GoldenSnapshotStatus: &ateapipb.GoldenSnapshotStatus{
+			GoldenSnapshotStatus: []*ateapipb.GoldenSnapshotStatus{{
 				GoldenSnapshot: &ateapipb.ObjectRef{
 					Atespace: resources.GoldenActorAtespace,
 					Name:     "2026-01-01t00-00-00z-abc",
 				},
-			},
+			}},
 		},
 	}
 

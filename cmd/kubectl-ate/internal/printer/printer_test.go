@@ -394,9 +394,9 @@ func TestPrintActorTemplatesTo_Table(t *testing.T) {
 				ConfigName:   "gvisor-default",
 			},
 			Status: &ateapipb.ActorTemplateStatus{
-				GoldenSnapshotStatus: &ateapipb.GoldenSnapshotStatus{
+				GoldenSnapshotStatus: []*ateapipb.GoldenSnapshotStatus{{
 					GoldenSnapshot: &ateapipb.ObjectRef{Atespace: "ate-golden", Name: "snap-1"},
-				},
+				}},
 			},
 		},
 		{
@@ -411,9 +411,9 @@ func TestPrintActorTemplatesTo_Table(t *testing.T) {
 				ConfigName:   "microvm",
 			},
 			Status: &ateapipb.ActorTemplateStatus{
-				GoldenSnapshotStatus: &ateapipb.GoldenSnapshotStatus{
+				GoldenSnapshotStatus: []*ateapipb.GoldenSnapshotStatus{{
 					ErrorMessage: "golden actor failed to start",
-				},
+				}},
 			},
 		},
 		{

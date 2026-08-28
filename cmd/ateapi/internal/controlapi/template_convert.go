@@ -298,12 +298,12 @@ func templateStatusFromCRD(in atev1alpha1.ActorTemplateStatus) *ateapipb.ActorTe
 	if in.GoldenSnapshot != "" {
 		// The CRD stores only the snapshot name; golden snapshots always live
 		// in the reserved golden atespace.
-		out.GoldenSnapshotStatus = &ateapipb.GoldenSnapshotStatus{
+		out.GoldenSnapshotStatus = []*ateapipb.GoldenSnapshotStatus{{
 			GoldenSnapshot: &ateapipb.ObjectRef{
 				Atespace: resources.GoldenActorAtespace,
 				Name:     in.GoldenSnapshot,
 			},
-		}
+		}}
 	}
 	return out
 }
