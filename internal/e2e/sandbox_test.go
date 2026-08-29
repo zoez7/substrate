@@ -212,23 +212,6 @@ func TestRenderSubstrateFixtures_MicroVM(t *testing.T) {
 	}
 }
 
-// TestEgressFixture covers the knob the networking suite reads: the class
-// picks the fixture.
-func TestEgressFixture(t *testing.T) {
-	t.Run("gvisor", func(t *testing.T) {
-		t.Setenv(sandboxClassEnv, "")
-		if got := EgressFixture(); got.Namespace != "ate-demo-egress" || got.Name != "egress" {
-			t.Errorf("EgressFixture() = %+v, want the gVisor egress demo", got)
-		}
-	})
-	t.Run("microvm", func(t *testing.T) {
-		t.Setenv(sandboxClassEnv, SandboxClassMicroVM)
-		if got := EgressFixture(); got.Namespace != "ate-demo-egress-microvm" || got.Name != "egress-microvm" {
-			t.Errorf("EgressFixture() = %+v, want the micro-VM egress demo", got)
-		}
-	})
-}
-
 // TestSubstrateEgressFixture covers both knobs the networking suite's egress
 // tests read: the class and the egress gateway variant pick the fixture.
 func TestSubstrateEgressFixture(t *testing.T) {

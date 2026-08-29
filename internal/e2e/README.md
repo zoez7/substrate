@@ -27,8 +27,8 @@ for example via `hack/install-ate.sh --deploy-ate-system` or
 The suites are runtime-agnostic: the same tests run against gVisor and against
 the micro-VM (kata + cloud-hypervisor) sandbox class. `E2E_SANDBOX_CLASS`
 selects which, by repointing every fixture at its variant --- see
-`e2e.CounterFixture`, `e2e.EgressFixture` and `e2e.RenderFixtureManifest` in
-[sandbox.go](sandbox.go). Unset means gVisor.
+`e2e.SubstrateCounterFixture`, `e2e.SubstrateEgressFixture` and
+`e2e.RenderFixtureManifest` in [sandbox.go](sandbox.go). Unset means gVisor.
 
 ```shell
 # gVisor (the default), against the demos install-ate-kind.sh deploys
@@ -47,8 +47,9 @@ $ hack/install-ate-kind.sh --deploy-demo-egress-microvm # egress-microvm
 ```
 
 A handful of knobs override the class defaults, mostly for a cluster that
-installs the fixtures elsewhere: `E2E_TEMPLATE_NAMESPACE` / `E2E_TEMPLATE_NAME`
-point the counter fixture somewhere else, and `E2E_TEMPLATE_READY_TIMEOUT`
+installs the fixtures elsewhere: `E2E_SUBSTRATE_TEMPLATE_ATESPACE` /
+`E2E_SUBSTRATE_TEMPLATE_NAME` (and the `E2E_SUBSTRATE_POOL_*` pair) point the
+counter fixture somewhere else, and `E2E_TEMPLATE_READY_TIMEOUT`
 replaces the golden-snapshot budget (90s on gVisor, 10m on micro-VM, where the
 golden is a cloud-hypervisor cold boot plus a checkpoint).
 

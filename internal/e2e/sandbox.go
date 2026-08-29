@@ -38,17 +38,6 @@ func SandboxClass() string { return os.Getenv(sandboxClassEnv) }
 // Assertions that only hold for one runtime gate on this.
 func IsMicroVM() bool { return SandboxClass() == SandboxClassMicroVM }
 
-// Fixture identifies an installed WorkerPool + ActorTemplate pair (both carry
-// the same name) that suites either create Actors from directly or copy the
-// resolved runtime — sandbox class, ateom image, container images — out of.
-type Fixture struct {
-	Namespace string
-	Name      string
-	// DeployWith is the install flag or script that creates the fixture, so a
-	// missing one reports how to fix it rather than just failing.
-	DeployWith string
-}
-
 // SubstrateFixture identifies an installed substrate ActorTemplate (the proto
 // resource created through the ate API, not the CRD) plus the CRD WorkerPool
 // backing it. Suites copy the resolved runtime — container images, sandbox
@@ -124,22 +113,6 @@ func SubstrateEgressFixture() SubstrateFixture {
 		PoolNamespace: "ate-demo-egress" + variant,
 		PoolName:      "egress" + variant,
 		DeployWith:    "hack/install-ate-kind.sh --deploy-demo-egress" + variant,
-	}
-}
-
-// EgressFixture returns the egress demo for the sandbox class under test.
-func EgressFixture() Fixture {
-	if IsMicroVM() {
-		return Fixture{
-			Namespace:  "ate-demo-egress-microvm",
-			Name:       "egress-microvm",
-			DeployWith: "hack/install-ate-kind.sh --deploy-demo-egress-microvm",
-		}
-	}
-	return Fixture{
-		Namespace:  "ate-demo-egress",
-		Name:       "egress",
-		DeployWith: "hack/install-ate-kind.sh --deploy-demo-egress",
 	}
 }
 
