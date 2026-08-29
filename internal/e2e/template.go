@@ -69,8 +69,8 @@ func TemplateRef(at *ateapipb.ActorTemplate) *ateapipb.ObjectRef {
 	return &ateapipb.ObjectRef{Atespace: at.GetMetadata().GetAtespace(), Name: at.GetMetadata().GetName()}
 }
 
-// SubstrateCounterTemplateOptions shapes CreateSubstrateCounterTemplate.
-type SubstrateCounterTemplateOptions struct {
+// SubstrateTemplateOptions shapes CreateSubstrateTemplateFrom.
+type SubstrateTemplateOptions struct {
 	// Atespace and Name locate the new template. The atespace is created if
 	// missing; Name must be unique within it (atespaces are shared across a
 	// suite's tests, unlike the k8s namespaces the CRD templates lived in).
@@ -90,15 +90,20 @@ type SubstrateCounterTemplateOptions struct {
 }
 
 // CreateSubstrateCounterTemplate creates a per-test WorkerPool CRD plus a
-// substrate ActorTemplate copying the resolved runtime (sandbox config, ateom
-// image, container images, sandbox size) from the substrate counter demo for
-// the sandbox class under test. It registers cleanup of the template (which
-// does not ride the k8s namespace GC the CRD templates did) and blocks until
-// the golden snapshot exists.
-func CreateSubstrateCounterTemplate(ctx context.Context, t *testing.T, clients *Clients, namespace string, opts SubstrateCounterTemplateOptions) *ateapipb.ActorTemplate {
+// substrate ActorTemplate copying the resolved runtime from the substrate
+// counter demo for the sandbox class under test.
+func CreateSubstrateCounterTemplate(ctx context.Context, t *testing.T, clients *Clients, namespace string, opts SubstrateTemplateOptions) *ateapipb.ActorTemplate {
 	t.Helper()
+	return CreateSubstrateTemplateFrom(ctx, t, clients, namespace, SubstrateCounterFixture(), opts)
+}
 
-	src := SubstrateCounterFixture()
+// CreateSubstrateTemplateFrom creates a per-test WorkerPool CRD plus a
+// substrate ActorTemplate copying the resolved runtime (sandbox config, ateom
+// image, container images, sandbox size) from the installed fixture src. It
+// registers cleanup of the template (which does not ride the k8s namespace GC
+// the CRD templates did) and blocks until the golden snapshot exists.
+func CreateSubstrateTemplateFrom(ctx context.Context, t *testing.T, clients *Clients, namespace string, src SubstrateFixture, opts SubstrateTemplateOptions) *ateapipb.ActorTemplate {
+	t.Helper()
 
 	existingWp, err := clients.SubstrateK8s.ApiV1alpha1().WorkerPools(src.PoolNamespace).Get(ctx, src.PoolName, metav1.GetOptions{})
 	if err != nil {
