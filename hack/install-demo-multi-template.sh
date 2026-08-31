@@ -35,18 +35,32 @@ demo-multi-template_deploy() {
   sed "s|\${BUCKET_NAME}|${BUCKET_NAME}|g" demos/multi-template/multi-template.yaml.tmpl \
     | run_ko apply -f -
 
-  # Wait for both ActorTemplates to be ready before returning.
-  log_step "Waiting for multi-template demo to be ready..."
-  wait_for_pool_rollout shared-pool ate-demo-multi-template-pool
-  run_kubectl wait --for=condition=Ready actortemplate/counter -n ate-demo-multi-template-counter --timeout=300s
-  run_kubectl wait --for=condition=Ready actortemplate/fspersist -n ate-demo-multi-template-fspersist --timeout=300s
+  log_step "Waiting for the shared-pool worker pool rollout..."
+  wait_for_pool_rollout_fatal shared-pool ate-demo-multi-template-pool
+
+  # Two templates in two atespaces, one pool: the composed form of what
+  # deploy_substrate_demo does for single-template demos.
+  create_substrate_template \
+    demos/multi-template/multi-template-counter-template.yaml.tmpl \
+    ate-demo-multi-template-counter counter
+  create_substrate_template \
+    demos/multi-template/multi-template-fspersist-template.yaml.tmpl \
+    ate-demo-multi-template-fspersist fspersist
+
+  # Wait for both templates' golden snapshots before returning.
+  log_step "Waiting for the multi-template golden snapshots..."
+  if ! wait_actortemplate_ready ate-demo-multi-template-counter counter 300; then
+    exit 1
+  fi
+  if ! wait_actortemplate_ready ate-demo-multi-template-fspersist fspersist 300; then
+    exit 1
+  fi
 }
 
 demo-multi-template_delete() {
   log_step "demo-multi-template_delete"
-  delete_demo_actors \
-    ate-demo-multi-template-counter counter \
-    ate-demo-multi-template-fspersist fspersist
+  delete_substrate_templates ate-demo-multi-template-counter counter
+  delete_substrate_templates ate-demo-multi-template-fspersist fspersist
   sed "s|\${BUCKET_NAME}|${BUCKET_NAME}|g" demos/multi-template/multi-template.yaml.tmpl \
     | run_kubectl delete --ignore-not-found -f -
 }

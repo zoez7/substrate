@@ -27,9 +27,15 @@ func init() {
 		Short:       "Two ActorTemplates sharing one WorkerPool",
 		Template:    "demos/multi-template/multi-template.yaml.tmpl",
 		Deployments: []steps.TemplateRef{{Atespace: "ate-demo-multi-template-pool", Name: "shared-pool"}},
-		ActorTemplates: []steps.TemplateRef{
-			{Atespace: "ate-demo-multi-template-counter", Name: "counter"},
-			{Atespace: "ate-demo-multi-template-fspersist", Name: "fspersist"},
+		TemplateManifests: []steps.TemplateManifest{
+			{
+				Path: "demos/multi-template/multi-template-counter-template.yaml.tmpl",
+				Ref:  steps.TemplateRef{Atespace: "ate-demo-multi-template-counter", Name: "counter"},
+			},
+			{
+				Path: "demos/multi-template/multi-template-fspersist-template.yaml.tmpl",
+				Ref:  steps.TemplateRef{Atespace: "ate-demo-multi-template-fspersist", Name: "fspersist"},
+			},
 		},
 	})
 }
