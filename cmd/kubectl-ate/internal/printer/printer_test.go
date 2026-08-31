@@ -66,8 +66,7 @@ func TestPrintActorsTo_Table(t *testing.T) {
 				Version:    2,
 				CreateTime: timestamppb.New(now.Add(-5 * time.Minute)),
 			},
-			ActorTemplateNamespace: "default",
-			ActorTemplateName:      "template-1",
+			ActorTemplate: &ateapipb.ObjectRef{Atespace: "default", Name: "template-1"},
 			Status: &ateapipb.ActorStatus{
 				State: ateapipb.ActorState_ACTOR_STATE_RUNNING,
 				WorkerAssignment: &ateapipb.WorkerAssignment{
@@ -156,9 +155,8 @@ func TestPrintActorsTo_Table_Sorted(t *testing.T) {
 				Atespace:   "team-b",
 				CreateTime: timestamppb.New(now.Add(-72 * time.Hour)),
 			},
-			ActorTemplateNamespace: "default",
-			ActorTemplateName:      "template-1",
-			Status:                 &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_SUSPENDED},
+			ActorTemplate: &ateapipb.ObjectRef{Atespace: "default", Name: "template-1"},
+			Status:        &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_SUSPENDED},
 		},
 		{
 			Metadata: &ateapipb.ResourceMetadata{
@@ -166,9 +164,8 @@ func TestPrintActorsTo_Table_Sorted(t *testing.T) {
 				Atespace:   "team-a",
 				CreateTime: timestamppb.New(now.Add(-5 * time.Minute)),
 			},
-			ActorTemplateNamespace: "default",
-			ActorTemplateName:      "template-1",
-			Status:                 &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING},
+			ActorTemplate: &ateapipb.ObjectRef{Atespace: "default", Name: "template-1"},
+			Status:        &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING},
 		},
 		{
 			Metadata: &ateapipb.ResourceMetadata{
@@ -176,9 +173,8 @@ func TestPrintActorsTo_Table_Sorted(t *testing.T) {
 				Atespace:   "team-a",
 				CreateTime: timestamppb.New(now.Add(-5 * time.Hour)),
 			},
-			ActorTemplateNamespace: "other",
-			ActorTemplateName:      "template-2",
-			Status:                 &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_SUSPENDED},
+			ActorTemplate: &ateapipb.ObjectRef{Atespace: "other", Name: "template-2"},
+			Status:        &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_SUSPENDED},
 		},
 	}
 

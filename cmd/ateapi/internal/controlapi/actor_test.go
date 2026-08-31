@@ -90,6 +90,10 @@ func TestValidateCreateActorRequest(t *testing.T) {
 		validReq(validActor(withActorTemplate("as", "tmpl"))),
 		nil,
 	}, {
+		"missing actor.actor_template",
+		validReq(validActor(func(a *ateapipb.Actor) { a.ActorTemplate = nil })),
+		field.ErrorList{field.Required(field.NewPath("actor", "actor_template"), "")},
+	}, {
 		"missing actor.actor_template.atespace",
 		validReq(validActor(withActorTemplate("", "tmpl"))),
 		field.ErrorList{field.Required(field.NewPath("actor", "actor_template", "atespace"), "")},
@@ -221,15 +225,15 @@ func TestValidateActorUpdate(t *testing.T) {
 		validOutput(withMetadata(func(m *ateapipb.ResourceMetadata) { m.Name = "invalid value" })),
 		field.ErrorList{field.Invalid(field.NewPath("metadata", "name"), nil, "").WithOrigin("immutable")},
 	}, {
-		"change actor.actor_template",
+		"change actor.actor_template is allowed",
 		validInput(withActorTemplate("as1", "nm1")),
 		validOutput(withActorTemplate("as2", "nm2")),
-		field.ErrorList{field.Invalid(field.NewPath("actor_template"), nil, "").WithOrigin("immutable")},
+		nil,
 	}, {
 		"clear actor.actor_template",
 		validInput(withActorTemplate("as", "nm")),
 		validOutput(func(a *ateapipb.Actor) { a.ActorTemplate = nil }),
-		field.ErrorList{field.Invalid(field.NewPath("actor_template"), nil, "").WithOrigin("immutable")},
+		field.ErrorList{field.Required(field.NewPath("actor_template"), "")},
 	}, {
 		"add actor.source_snapshot_tag",
 		validInput(),

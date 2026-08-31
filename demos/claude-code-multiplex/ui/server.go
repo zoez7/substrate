@@ -413,7 +413,7 @@ func handleActors(w http.ResponseWriter, r *http.Request) {
 	}
 	actors := make([]actorSummary, 0, len(resp.GetActors()))
 	for _, a := range resp.GetActors() {
-		if namespace != "" && a.GetActorTemplateNamespace() != "" && a.GetActorTemplateNamespace() != namespace {
+		if namespace != "" && a.GetActorTemplate().GetAtespace() != "" && a.GetActorTemplate().GetAtespace() != namespace {
 			continue
 		}
 		// Carry the template name as the meta message so the UI's
@@ -422,7 +422,7 @@ func handleActors(w http.ResponseWriter, r *http.Request) {
 		// substrate Actors there's no equivalent, so the template
 		// name is the closest semantic match).
 		msg := ""
-		if t := a.GetActorTemplateName(); t != "" {
+		if t := a.GetActorTemplate().GetName(); t != "" {
 			msg = "template: " + t
 		}
 		actors = append(actors, actorSummary{

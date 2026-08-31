@@ -25,7 +25,6 @@ import (
 func TestBuildCreateActorRequest(t *testing.T) {
 	tests := []struct {
 		name        string
-		template    string
 		templateRef string
 		snapshotTag string
 		want        *ateapipb.Actor
@@ -55,7 +54,7 @@ func TestBuildCreateActorRequest(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got, err := buildCreateActorRequest("my-counter", "demo", test.template, test.templateRef, test.snapshotTag)
+			got, err := buildCreateActorRequest("my-counter", "demo", test.templateRef, test.snapshotTag)
 			if (err != nil) != test.wantErr {
 				t.Fatalf("buildCreateActorRequest error = %v, wantErr %t", err, test.wantErr)
 			}

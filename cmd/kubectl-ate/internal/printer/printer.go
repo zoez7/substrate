@@ -60,13 +60,10 @@ func sortActors(actors []*ateapipb.Actor) {
 }
 
 // actorTemplateDisplay renders the template an actor was created from, in
-// "<atespace>/<name>" form for substrate-resource references and
-// "<namespace>/<name>" form for legacy CRD references.
+// "<atespace>/<name>" form.
 func actorTemplateDisplay(a *ateapipb.Actor) string {
-	if ref := a.GetActorTemplate(); ref != nil {
-		return ref.GetAtespace() + "/" + ref.GetName()
-	}
-	return a.GetActorTemplateNamespace() + "/" + a.GetActorTemplateName()
+	ref := a.GetActorTemplate()
+	return ref.GetAtespace() + "/" + ref.GetName()
 }
 
 // PrintActorsTo prints a slice of actors to the provided writer.
