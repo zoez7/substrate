@@ -27,8 +27,8 @@ import (
 // against it because the demo manifests own the template, not the actors that
 // were created from it.
 type TemplateRef struct {
-	Namespace string
-	Name      string
+	Atespace string
+	Name     string
 }
 
 // DeleteDemoActors removes every actor created from the given ActorTemplates.
@@ -52,12 +52,11 @@ func (e *Env) DeleteDemoActors(ctx context.Context, refs ...TemplateRef) error {
 		return nil
 	}
 
-	client, err := ateclient.NewClient(ctx, e.Cfg.Kubeconfig, e.Cfg.Context, "", "", false)
+	client, err := e.AteClient(ctx)
 	if err != nil {
 		log.Warnf("could not connect to ate-api-server; skipping actor cleanup: %v", err)
 		return nil
 	}
-	defer client.Close()
 
 	actors, err := listAllActors(ctx, client)
 	if err != nil {
@@ -66,9 +65,9 @@ func (e *Env) DeleteDemoActors(ctx context.Context, refs ...TemplateRef) error {
 	}
 
 	for _, ref := range refs {
-		log.Stepf("Deleting actors for %s/%s", ref.Namespace, ref.Name)
+		log.Stepf("Deleting actors for %s/%s", ref.Atespace, ref.Name)
 		for _, actor := range actors {
-			if actor.GetActorTemplateNamespace() != ref.Namespace || actor.GetActorTemplateName() != ref.Name {
+			if actor.GetActorTemplate().GetAtespace() != ref.Atespace || actor.GetActorTemplate().GetName() != ref.Name {
 				continue
 			}
 			actorRef := resources.ActorRefFromActor(actor)

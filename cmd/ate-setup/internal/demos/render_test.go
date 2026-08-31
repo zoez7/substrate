@@ -22,6 +22,7 @@ import (
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/demos"
 	_ "github.com/agent-substrate/substrate/cmd/ate-setup/internal/demos/all"
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/demos/demotest"
+	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/steps"
 )
 
 // TestDemoTemplatesRender guards against drift between the demo templates and
@@ -50,5 +51,31 @@ func TestDemoTemplatesRender(t *testing.T) {
 	}
 	if want := len(demos.All()) - 1; covered != want {
 		t.Errorf("covered %d demo templates, want %d", covered, want)
+	}
+}
+
+// TestDemoActorTemplateManifestsParse renders every demo's substrate
+// ActorTemplate manifests and parses them under the strict protojson rules
+// that `create actor-template` applies, so an enum typo or an unknown field
+// fails here rather than at deploy time.
+func TestDemoActorTemplateManifestsParse(t *testing.T) {
+	e := demotest.Env(t)
+
+	for _, demo := range demos.All() {
+		substrate, ok := demo.(interface {
+			SubstrateTemplateManifests() []steps.TemplateManifest
+		})
+		if !ok {
+			continue
+		}
+		for _, m := range substrate.SubstrateTemplateManifests() {
+			t.Run(demo.Name()+"/"+m.Ref.Name, func(t *testing.T) {
+				rendered, err := demos.RenderTemplateManifest(e, m.Path, nil)
+				if err != nil {
+					t.Fatalf("RenderTemplateManifest: %v", err)
+				}
+				demotest.AssertActorTemplateManifest(t, rendered, m.Ref)
+			})
+		}
 	}
 }

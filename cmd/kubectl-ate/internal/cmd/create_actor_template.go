@@ -20,11 +20,10 @@ import (
 	"os"
 
 	"github.com/agent-substrate/substrate/cmd/kubectl-ate/internal/printer"
+	"github.com/agent-substrate/substrate/internal/atemanifest"
 	"github.com/agent-substrate/substrate/internal/ateclient"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"github.com/spf13/cobra"
-	"google.golang.org/protobuf/encoding/protojson"
-	"sigs.k8s.io/yaml"
 )
 
 var createActorTemplateFilenameFlag string
@@ -48,7 +47,7 @@ Actor templates are immutable: there is no update; delete and recreate to change
 		if err != nil {
 			return err
 		}
-		template, err := actorTemplateFromManifest(data)
+		template, err := atemanifest.ParseActorTemplate(data)
 		if err != nil {
 			return fmt.Errorf("failed to parse actor template manifest %q: %w", createActorTemplateFilenameFlag, err)
 		}
@@ -66,24 +65,6 @@ Actor templates are immutable: there is no update; delete and recreate to change
 		}
 		return printer.PrintActorTemplate(resp, outputFmt)
 	},
-}
-
-// actorTemplateFromManifest parses a single protojson-shaped YAML or JSON
-// document into an ActorTemplate. Parsing is strict: unknown fields are an
-// error, so typos don't silently drop configuration.
-func actorTemplateFromManifest(data []byte) (*ateapipb.ActorTemplate, error) {
-	jsonData, err := yaml.YAMLToJSON(data)
-	if err != nil {
-		return nil, fmt.Errorf("invalid YAML: %w", err)
-	}
-	if string(jsonData) == "null" {
-		return nil, fmt.Errorf("manifest is empty")
-	}
-	template := &ateapipb.ActorTemplate{}
-	if err := protojson.Unmarshal(jsonData, template); err != nil {
-		return nil, err
-	}
-	return template, nil
 }
 
 // readFileOrStdin reads the manifest from path, or from in when path is "-".

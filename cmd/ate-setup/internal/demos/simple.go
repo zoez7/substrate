@@ -26,8 +26,9 @@ import (
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/steps"
 )
 
-// actorTemplateGVK identifies the resource the demos wait on: an ActorTemplate
-// goes Ready once its golden snapshot has been built.
+// actorTemplateGVK identifies the resource the CRD-form demos wait on: an
+// ActorTemplate goes Ready once its golden snapshot has been built. It goes
+// away with the last CRD-form demo.
 var actorTemplateGVK = schema.GroupVersionKind{
 	Group:   "ate.dev",
 	Version: "v1alpha1",
@@ -57,16 +58,30 @@ func Render(e *steps.Env, relPath string, extraValues map[string]string, drop []
 	return render.Template(e.Cfg.Path(relPath), values, drop)
 }
 
-// WaitActorTemplateReady blocks until an ActorTemplate's golden snapshot is
+// RenderTemplateManifest expands a substrate ActorTemplate manifest. The
+// external-volume placeholders that extraValues does not supply are dropped,
+// so the same manifest serves both the plain and the external-volume deploys.
+func RenderTemplateManifest(e *steps.Env, relPath string, extraValues map[string]string) ([]byte, error) {
+	drop := make([]string, 0, len(ExternalVolumePlaceholders))
+	for _, p := range ExternalVolumePlaceholders {
+		if _, ok := extraValues[p]; !ok {
+			drop = append(drop, p)
+		}
+	}
+	return Render(e, relPath, extraValues, drop)
+}
+
+// WaitActorTemplateReady blocks until a CRD ActorTemplate's golden snapshot is
 // built, the `kubectl wait --for=condition=Ready actortemplate/...` of the demo
-// scripts.
+// scripts. Substrate templates wait through Env.WaitActorTemplateGolden
+// instead.
 func WaitActorTemplateReady(ctx context.Context, e *steps.Env, namespace, name string) error {
 	return e.Kube.WaitCondition(ctx, actorTemplateGVK, namespace, name, "Ready", steps.DemoTimeout)
 }
 
-// Simple covers the demos that are one template plus a fixed set of readiness
-// waits: render, ko apply, wait; and on delete, remove the actors then the same
-// rendered manifest.
+// Simple covers the demos that are one workload manifest plus a fixed set of
+// ActorTemplates: render, ko apply, create the templates, wait; and on delete,
+// remove the actors, the templates, then the rendered manifest.
 //
 // Demos that need more embed it and override a method, calling back into
 // DeployWorkload and WaitReady to keep the shared ordering.
@@ -77,20 +92,34 @@ type Simple struct {
 	// Short is the one-line summary, in cobra's sense of the word.
 	Short string
 
-	// Template is the *.yaml.tmpl path, relative to the repository root.
+	// Template is the *.yaml.tmpl path of the Kubernetes manifest, relative to
+	// the repository root: the namespace and WorkerPool, and, for demos not
+	// yet converted to substrate ActorTemplates, the ActorTemplate CRDs too.
 	Template string
+
+	// TemplateManifests are the demo's substrate ActorTemplate manifests,
+	// created through the control-plane API after the workload manifest is
+	// applied.
+	TemplateManifests []steps.TemplateManifest
+
+	// TemplateExtraValues optionally supplies extra placeholder values for the
+	// TemplateManifests render, e.g. the counter demo's external-volume
+	// stanzas. Placeholders it does not supply are dropped.
+	TemplateExtraValues func(e *steps.Env) map[string]string
 
 	// Deployments are the Deployments to wait for at deploy time, in order.
 	// The WorkerPool controller names each Deployment after its WorkerPool.
 	Deployments []steps.TemplateRef
 
-	// ActorTemplates are the demo's ActorTemplates. Their actors are removed
-	// before the manifests at delete time.
+	// ActorTemplates are the demo's CRD-form ActorTemplates, applied as part
+	// of Template. Their actors are removed before the manifests at delete
+	// time. Converted demos list their templates in TemplateManifests instead.
 	ActorTemplates []steps.TemplateRef
 
 	// SkipReadinessWait deploys without blocking on the ActorTemplates. The
 	// sandbox demo sets this: it has no long-lived workload, and its template
-	// is exercised on demand by the client rather than at install time.
+	// is exercised on demand by the client rather than at install time. The
+	// templates themselves are still created.
 	SkipReadinessWait bool
 }
 
@@ -100,9 +129,15 @@ func (d *Simple) Description() string { return d.Short }
 // Flags registers nothing: most demos take no options.
 func (d *Simple) Flags(*pflag.FlagSet) {}
 
-// TemplatePath exposes the demo's template through the Demo interface, so tests
-// can check that every template renders cleanly.
+// TemplatePath exposes the demo's workload manifest through the Demo
+// interface, so tests can check that every template renders cleanly.
 func (d *Simple) TemplatePath() string { return d.Template }
+
+// SubstrateTemplateManifests exposes the demo's substrate ActorTemplate
+// manifests, so tests can check that every one renders and parses cleanly.
+func (d *Simple) SubstrateTemplateManifests() []steps.TemplateManifest {
+	return d.TemplateManifests
+}
 
 func (d *Simple) Deploy(ctx context.Context, e *steps.Env) error {
 	log.Step(d.DemoName + "_deploy")
@@ -115,9 +150,9 @@ func (d *Simple) Deploy(ctx context.Context, e *steps.Env) error {
 	return d.WaitReady(ctx, e)
 }
 
-// DeployWorkload renders the demo template and applies it through ko, without
-// waiting. Demos that install add-ons alongside the workload call this directly
-// so they can order the add-ons against it.
+// DeployWorkload renders the demo's workload manifest and applies it through
+// ko, without waiting. Demos that install add-ons alongside the workload call
+// this directly so they can order the add-ons against it.
 func (d *Simple) DeployWorkload(ctx context.Context, e *steps.Env) error {
 	manifest, err := Render(e, d.Template, nil, ExternalVolumePlaceholders)
 	if err != nil {
@@ -126,7 +161,9 @@ func (d *Simple) DeployWorkload(ctx context.Context, e *steps.Env) error {
 	return e.KoApplyBytes(ctx, manifest)
 }
 
-// WaitReady blocks until the demo's workloads and templates are usable.
+// WaitReady blocks until the demo's workloads and templates are usable: the
+// WorkerPool Deployments are rolled out, the substrate ActorTemplates are
+// created, and every template has its golden snapshot.
 //
 // On a cold cluster the first ActorTemplate pays one-time costs: downloading
 // the gVisor runsc binary, the first gVisor pod start, and image pulls.
@@ -134,30 +171,75 @@ func (d *Simple) DeployWorkload(ctx context.Context, e *steps.Env) error {
 // ActorTemplate with a tight readiness deadline -- run against an already-warm
 // node instead of racing that cold-start work.
 func (d *Simple) WaitReady(ctx context.Context, e *steps.Env) error {
+	if !d.SkipReadinessWait && len(d.Deployments) > 0 {
+		log.Stepf("Waiting for %s to be ready...", d.DemoName)
+		for _, ref := range d.Deployments {
+			if err := e.Kube.RolloutStatus(ctx, kube.KindDeployment, ref.Atespace, ref.Name, steps.DemoTimeout); err != nil {
+				return err
+			}
+		}
+	}
+	// Created even under SkipReadinessWait: skipping the wait must not skip
+	// the template.
+	for _, m := range d.TemplateManifests {
+		if err := e.EnsureAtespace(ctx, m.Ref.Atespace); err != nil {
+			return err
+		}
+		var extra map[string]string
+		if d.TemplateExtraValues != nil {
+			extra = d.TemplateExtraValues(e)
+		}
+		rendered, err := RenderTemplateManifest(e, m.Path, extra)
+		if err != nil {
+			return err
+		}
+		if err := e.CreateActorTemplate(ctx, rendered); err != nil {
+			return err
+		}
+	}
 	if d.SkipReadinessWait {
 		return nil
 	}
-	if len(d.Deployments) == 0 && len(d.ActorTemplates) == 0 {
-		return nil
-	}
-	log.Stepf("Waiting for %s to be ready...", d.DemoName)
-	for _, ref := range d.Deployments {
-		if err := e.Kube.RolloutStatus(ctx, kube.KindDeployment, ref.Namespace, ref.Name, steps.DemoTimeout); err != nil {
+	for _, m := range d.TemplateManifests {
+		timeout := m.GoldenTimeout
+		if timeout == 0 {
+			timeout = steps.DemoTimeout
+		}
+		if err := e.WaitActorTemplateGolden(ctx, m.Ref, timeout); err != nil {
 			return err
 		}
 	}
 	for _, ref := range d.ActorTemplates {
-		if err := WaitActorTemplateReady(ctx, e, ref.Namespace, ref.Name); err != nil {
+		if err := WaitActorTemplateReady(ctx, e, ref.Atespace, ref.Name); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
+// templateRefs collects every template the demo owns, CRD and substrate alike,
+// for actor cleanup at delete time.
+func (d *Simple) templateRefs() []steps.TemplateRef {
+	refs := append([]steps.TemplateRef{}, d.ActorTemplates...)
+	for _, m := range d.TemplateManifests {
+		refs = append(refs, m.Ref)
+	}
+	return refs
+}
+
 func (d *Simple) Delete(ctx context.Context, e *steps.Env) error {
 	log.Step(d.DemoName + "_delete")
-	if err := e.DeleteDemoActors(ctx, d.ActorTemplates...); err != nil {
+	if err := e.DeleteDemoActors(ctx, d.templateRefs()...); err != nil {
 		return err
+	}
+	if len(d.TemplateManifests) > 0 {
+		refs := make([]steps.TemplateRef, 0, len(d.TemplateManifests))
+		for _, m := range d.TemplateManifests {
+			refs = append(refs, m.Ref)
+		}
+		if err := e.DeleteActorTemplates(ctx, refs...); err != nil {
+			return err
+		}
 	}
 	manifest, err := Render(e, d.Template, nil, ExternalVolumePlaceholders)
 	if err != nil {

@@ -26,6 +26,7 @@ import (
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/ko"
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/kube"
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/kustomize"
+	"github.com/agent-substrate/substrate/internal/ateclient"
 )
 
 // Timeouts carried over from the --timeout values in the shell installer.
@@ -57,6 +58,11 @@ type Env struct {
 	// ko is created lazily. Steps that only apply static manifests must work
 	// on a machine with no container registry credentials configured.
 	ko *ko.Runner
+
+	// ate is the control-plane client, dialed lazily by AteClient: most steps
+	// talk to the Kubernetes API only, and a bootstrap has no ate-api-server
+	// to connect to yet.
+	ate *ateclient.Client
 }
 
 // NewEnv connects to the cluster described by cfg.

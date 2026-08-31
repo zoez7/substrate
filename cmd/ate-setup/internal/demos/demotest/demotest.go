@@ -24,6 +24,7 @@ import (
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/config"
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/kube"
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/steps"
+	"github.com/agent-substrate/substrate/internal/atemanifest"
 )
 
 // Env builds an Env with no cluster connection. The render paths only read
@@ -59,5 +60,34 @@ func AssertRendered(t *testing.T, manifest []byte) {
 	}
 	if len(objs) == 0 {
 		t.Error("rendered manifest decoded to no objects")
+	}
+}
+
+// AssertActorTemplateManifest checks that a rendered substrate ActorTemplate
+// manifest parses under the same strict protojson rules the control-plane
+// client applies, and names the template the demo says it creates. This is
+// the render-time guard against enum typos and unknown-field drift that would
+// otherwise only surface against a real cluster.
+func AssertActorTemplateManifest(t *testing.T, manifest []byte, ref steps.TemplateRef) {
+	t.Helper()
+
+	template, err := atemanifest.ParseActorTemplate(manifest)
+	if err != nil {
+		t.Fatalf("ParseActorTemplate: %v\nmanifest:\n%s", err, manifest)
+	}
+	if got, want := template.GetMetadata().GetAtespace(), ref.Atespace; got != want {
+		t.Errorf("metadata.atespace = %q, want %q", got, want)
+	}
+	if got, want := template.GetMetadata().GetName(), ref.Name; got != want {
+		t.Errorf("metadata.name = %q, want %q", got, want)
+	}
+	if len(template.GetContainers()) == 0 {
+		t.Error("template has no containers")
+	}
+	if template.GetSnapshotsConfig().GetStorageLocation() == "" {
+		t.Error("template has no snapshotsConfig.storageLocation")
+	}
+	if template.GetSandboxConfig().GetConfigName() == "" {
+		t.Error("template has no sandboxConfig.configName")
 	}
 }
