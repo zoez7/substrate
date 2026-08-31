@@ -87,7 +87,7 @@ This command will:
 
 - Deploy `prometheus-adapter` into `ate-demo-autoscaled-workerpool` to serve `ate_workerpool_workers` on `external.metrics.k8s.io`.
 - Create the `ate-demo-autoscaled-workerpool` namespace.
-- Create one `WorkerPool` (`counter`, starting with 5 replicas), one `ActorTemplate` (`counter`), and one `HorizontalPodAutoscaler` (`counter`).
+- Create one `WorkerPool` (`counter`, starting with 5 replicas), one `HorizontalPodAutoscaler` (`counter`), and the `counter` actor template through the ate API (`kubectl ate create actor-template`) in the `ate-demo-autoscaled-workerpool` atespace.
 - Wait until the template is `Ready` and the pool is rolled out.
 
 ### 2. Verify Monitoring Stack & External Metric
@@ -104,20 +104,21 @@ kubectl get --raw "/apis/external.metrics.k8s.io/v1beta1/namespaces/ate-demo-aut
 
 ## How to Use
 
-We can trigger autoscaling by creating an atespace, spawning multiple actors, and sending traffic to assign workers in the pool:
+We can trigger autoscaling by spawning multiple actors and sending traffic to assign workers in the pool:
 
-### 1. Create an atespace and spawn load actors
+### 1. Spawn load actors
+
+The actors go in the demo's atespace, which the deploy step already created
+(`--template-ref` resolves the template by name within the actor's own
+atespace):
 
 ```sh
 # Install the CLI as a kubectl plugin if not already installed
 go install ./cmd/kubectl-ate
 
-# Create an atespace for the actors
-kubectl ate create atespace demo
-
 # Create 15 actors to generate load
 for i in {001..015}; do
-  kubectl ate create actor c$i -a demo --template ate-demo-autoscaled-workerpool/counter
+  kubectl ate create actor c$i -a ate-demo-autoscaled-workerpool --template-ref counter
 done
 ```
 
@@ -132,7 +133,7 @@ In a separate terminal, send requests in a retry loop across all hosts to activa
 ```sh
 for attempt in {1..10}; do
   for i in {001..015}; do
-    curl -s -H "Host: c$i.demo.actors.resources.substrate.ate.dev" http://localhost:8000 >/dev/null
+    curl -s -H "Host: c$i.ate-demo-autoscaled-workerpool.actors.resources.substrate.ate.dev" http://localhost:8000 >/dev/null
   done
   sleep 2
 done
@@ -153,19 +154,18 @@ Suspend the actors to drop the assigned worker count. After the 300s stabilizati
 
 ```sh
 for i in {001..015}; do
-  kubectl ate suspend actor c$i -a demo
+  kubectl ate suspend actor c$i -a ate-demo-autoscaled-workerpool
 done
 ```
 
 ## How to Uninstall
 
-First clean up the actors and atespace:
+First clean up the actors:
 
 ```sh
 for i in {001..015}; do
-  kubectl ate delete actor c$i -a demo
+  kubectl ate delete actor c$i -a ate-demo-autoscaled-workerpool
 done
-kubectl ate delete atespace demo
 ```
 
 Then remove the demo resources and namespace:

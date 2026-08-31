@@ -44,11 +44,14 @@ type demo struct {
 
 func init() {
 	demos.Register(&demo{Simple: demos.Simple{
-		DemoName:       "demo-autoscaled-workerpool",
-		Short:          "A WorkerPool scaled by an HPA over custom metrics (Kind only)",
-		Template:       "demos/autoscaled-workerpool/autoscaled-workerpool.yaml.tmpl",
-		Deployments:    []steps.TemplateRef{{Atespace: namespace, Name: "counter"}},
-		ActorTemplates: []steps.TemplateRef{{Atespace: namespace, Name: "counter"}},
+		DemoName:    "demo-autoscaled-workerpool",
+		Short:       "A WorkerPool scaled by an HPA over custom metrics (Kind only)",
+		Template:    "demos/autoscaled-workerpool/autoscaled-workerpool.yaml.tmpl",
+		Deployments: []steps.TemplateRef{{Atespace: namespace, Name: "counter"}},
+		TemplateManifests: []steps.TemplateManifest{{
+			Path: "demos/autoscaled-workerpool/autoscaled-workerpool-template.yaml.tmpl",
+			Ref:  steps.TemplateRef{Atespace: namespace, Name: "counter"},
+		}},
 	}})
 }
 
@@ -95,7 +98,14 @@ func (d *demo) Delete(ctx context.Context, e *steps.Env) error {
 	}
 	log.Step(d.DemoName + "_delete")
 
-	if err := e.DeleteDemoActors(ctx, d.ActorTemplates...); err != nil {
+	templates := make([]steps.TemplateRef, 0, len(d.TemplateManifests))
+	for _, m := range d.TemplateManifests {
+		templates = append(templates, m.Ref)
+	}
+	if err := e.DeleteDemoActors(ctx, templates...); err != nil {
+		return err
+	}
+	if err := e.DeleteActorTemplates(ctx, templates...); err != nil {
 		return err
 	}
 	// The HPA goes first so it cannot scale the pool back up while the

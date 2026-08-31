@@ -44,12 +44,9 @@ demo-autoscaled-workerpool_deploy() {
   # Ensure namespace exists before deploying adapter/workload
   run_kubectl create namespace ate-demo-autoscaled-workerpool --dry-run=client -o yaml | run_kubectl apply -f -
 
-  # Deploy common workload (Namespace, WorkerPool, ActorTemplate)
+  # Deploy common workload (Namespace, WorkerPool)
   log_step "Deploying autoscaled-workerpool workload..."
   sed -e "s|\${BUCKET_NAME}|${BUCKET_NAME}|g" \
-      -e "/\${VALIDATE_EXISTING_FILE_PATH_ARG}/d" \
-      -e "/\${EXTERNAL_VOLUME_MOUNTS}/d" \
-      -e "/\${EXTERNAL_VOLUMES}/d" \
       demos/autoscaled-workerpool/autoscaled-workerpool.yaml.tmpl \
     | run_ko apply -f -
 
@@ -59,8 +56,19 @@ demo-autoscaled-workerpool_deploy() {
   run_kubectl apply -f demos/autoscaled-workerpool/hpa-kind.yaml
 
   log_step "Waiting for autoscaled-workerpool demo to be ready..."
-  wait_for_pool_rollout counter ate-demo-autoscaled-workerpool
-  run_kubectl wait --for=condition=Ready actortemplate/counter -n ate-demo-autoscaled-workerpool --timeout=300s
+  wait_for_pool_rollout_fatal counter ate-demo-autoscaled-workerpool
+  # The template's external-volume placeholders are always dropped here; they
+  # exist for parity with the counter demo's --with-external-volume shape.
+  create_substrate_template \
+    demos/autoscaled-workerpool/autoscaled-workerpool-template.yaml.tmpl \
+    ate-demo-autoscaled-workerpool counter \
+    -e "/\${VALIDATE_EXISTING_FILE_PATH_ARG}/d" \
+    -e "/\${EXTERNAL_VOLUME_MOUNTS}/d" \
+    -e "/\${EXTERNAL_VOLUMES}/d"
+  log_step "Waiting for the ate-demo-autoscaled-workerpool/counter golden snapshot..."
+  if ! wait_actortemplate_ready ate-demo-autoscaled-workerpool counter 300; then
+    exit 1
+  fi
 }
 
 demo-autoscaled-workerpool_delete() {
@@ -69,15 +77,14 @@ demo-autoscaled-workerpool_delete() {
     echo "Error: --delete-demo-autoscaled-workerpool is not supported on GKE" >&2
     exit 1
   fi
-  delete_demo_actors ate-demo-autoscaled-workerpool counter
+  delete_substrate_templates ate-demo-autoscaled-workerpool counter
 
+  # The HPA goes first so it cannot scale the pool back up while the workload
+  # is being removed.
   run_kubectl delete --ignore-not-found -f demos/autoscaled-workerpool/hpa-kind.yaml
   run_kubectl delete --ignore-not-found -f demos/autoscaled-workerpool/prometheus-adapter.yaml
 
   sed -e "s|\${BUCKET_NAME}|${BUCKET_NAME}|g" \
-      -e "/\${VALIDATE_EXISTING_FILE_PATH_ARG}/d" \
-      -e "/\${EXTERNAL_VOLUME_MOUNTS}/d" \
-      -e "/\${EXTERNAL_VOLUMES}/d" \
       demos/autoscaled-workerpool/autoscaled-workerpool.yaml.tmpl \
     | run_kubectl delete --ignore-not-found -f -
 }
