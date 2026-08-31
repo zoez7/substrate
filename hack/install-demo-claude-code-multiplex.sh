@@ -74,27 +74,26 @@ demo-claude-code-multiplex_deploy() {
   fi
   log_step "  workload image: ${workload_image}"
 
-  sed -e "s|\${BUCKET_NAME}|${BUCKET_NAME}|g" \
+  run_ko apply -f demos/claude-code-multiplex/claude-code-multiplex.yaml.tmpl
+
+  # Three templates in one atespace. The workload image is already
+  # digest-pinned, so the helper's `ko resolve` passes it through untouched.
+  local agent
+  for agent in luna mars orion; do
+    create_substrate_template \
+      "demos/claude-code-multiplex/agent-${agent}-template.yaml.tmpl" \
+      claude-multiplex-demo "agent-${agent}" \
       -e "s|\${ANTHROPIC_API_KEY}|${ANTHROPIC_API_KEY}|g" \
-      -e "s|\${WORKLOAD_IMAGE}|${workload_image}|g" \
-      demos/claude-code-multiplex/claude-code-multiplex.yaml.tmpl \
-    | run_ko apply -f -
+      -e "s|\${WORKLOAD_IMAGE}|${workload_image}|g"
+  done
 }
 
 demo-claude-code-multiplex_delete() {
   log_step "demo-claude-code-multiplex_delete"
-  delete_demo_actors \
-    claude-multiplex-demo agent-luna \
-    claude-multiplex-demo agent-mars \
-    claude-multiplex-demo agent-orion
-  # Delete-time substitution doesn't need a real image — k8s identifies
-  # resources by metadata, not container spec. Use placeholders so sed
-  # produces valid YAML even when the env vars aren't set.
-  sed -e "s|\${BUCKET_NAME}|${BUCKET_NAME:-placeholder}|g" \
-      -e "s|\${ANTHROPIC_API_KEY}|${ANTHROPIC_API_KEY:-placeholder}|g" \
-      -e "s|\${WORKLOAD_IMAGE}|placeholder|g" \
-      demos/claude-code-multiplex/claude-code-multiplex.yaml.tmpl \
-    | run_kubectl delete --ignore-not-found -f -
+  delete_substrate_templates claude-multiplex-demo \
+    agent-luna agent-mars agent-orion
+  run_kubectl delete --ignore-not-found \
+    -f demos/claude-code-multiplex/claude-code-multiplex.yaml.tmpl
 }
 
 demo-claude-code-multiplex_usage() {

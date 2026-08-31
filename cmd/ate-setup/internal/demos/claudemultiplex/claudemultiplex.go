@@ -22,7 +22,6 @@ package claudemultiplex
 
 import (
 	"bytes"
-	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -39,9 +38,9 @@ import (
 )
 
 const (
-	template  = "demos/claude-code-multiplex/claude-code-multiplex.yaml.tmpl"
-	workload  = "demos/claude-code-multiplex/workload"
-	namespace = "claude-multiplex-demo"
+	poolTemplate = "demos/claude-code-multiplex/claude-code-multiplex.yaml.tmpl"
+	workload     = "demos/claude-code-multiplex/workload"
+	namespace    = "claude-multiplex-demo"
 	// imageName is appended to KO_DOCKER_REPO to form the workload image
 	// repository.
 	imageName = "claude-multiplex-demo-workload"
@@ -53,6 +52,11 @@ var agents = []steps.TemplateRef{
 	{Atespace: namespace, Name: "agent-luna"},
 	{Atespace: namespace, Name: "agent-mars"},
 	{Atespace: namespace, Name: "agent-orion"},
+}
+
+// templateManifest is the protojson ActorTemplate manifest for one agent.
+func templateManifest(agent steps.TemplateRef) string {
+	return "demos/claude-code-multiplex/" + agent.Name + "-template.yaml.tmpl"
 }
 
 type demo struct{}
@@ -92,14 +96,33 @@ func (d *demo) Deploy(ctx context.Context, e *steps.Env) error {
 	}
 	log.Step("  workload image: " + image)
 
-	manifest, err := demos.Render(e, template, map[string]string{
-		"ANTHROPIC_API_KEY": e.Cfg.AnthropicAPIKey,
-		"WORKLOAD_IMAGE":    image,
-	}, nil)
+	manifest, err := demos.Render(e, poolTemplate, nil, nil)
 	if err != nil {
 		return err
 	}
-	return e.KoApplyBytes(ctx, manifest)
+	if err := e.KoApplyBytes(ctx, manifest); err != nil {
+		return err
+	}
+
+	// Three templates in one atespace. The workload image is already
+	// digest-pinned, so CreateActorTemplate's ko resolve passes it through
+	// untouched.
+	if err := e.EnsureAtespace(ctx, namespace); err != nil {
+		return err
+	}
+	for _, agent := range agents {
+		rendered, err := demos.Render(e, templateManifest(agent), map[string]string{
+			"ANTHROPIC_API_KEY": e.Cfg.AnthropicAPIKey,
+			"WORKLOAD_IMAGE":    image,
+		}, nil)
+		if err != nil {
+			return err
+		}
+		if err := e.CreateActorTemplate(ctx, rendered); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (d *demo) Delete(ctx context.Context, e *steps.Env) error {
@@ -108,28 +131,17 @@ func (d *demo) Delete(ctx context.Context, e *steps.Env) error {
 	if err := e.DeleteDemoActors(ctx, agents...); err != nil {
 		return err
 	}
+	if err := e.DeleteActorTemplates(ctx, agents...); err != nil {
+		return err
+	}
 
-	// Delete-time substitution does not need a real image: Kubernetes
-	// identifies resources by metadata, not container spec. Placeholders keep
-	// the rendered YAML valid even when the environment variables are unset,
-	// which is what DeleteAll relies on.
-	manifest, err := d.renderForDelete(e)
+	// The pool manifest carries no placeholders, so DeleteAll can render it
+	// with no credentials in the environment.
+	manifest, err := demos.Render(e, poolTemplate, nil, nil)
 	if err != nil {
 		return err
 	}
 	return e.Kube.DeleteBytes(ctx, manifest)
-}
-
-func (d *demo) renderForDelete(e *steps.Env) ([]byte, error) {
-	const placeholder = "placeholder"
-	values := map[string]string{
-		"BUCKET_NAME":       cmp.Or(e.Cfg.BucketName, placeholder),
-		"ANTHROPIC_API_KEY": cmp.Or(e.Cfg.AnthropicAPIKey, placeholder),
-		"WORKLOAD_IMAGE":    placeholder,
-	}
-	// demos.Render would re-add BUCKET_NAME from the config, which may be
-	// empty; the value above wins because it is applied after.
-	return demos.Render(e, template, values, nil)
 }
 
 // buildWorkload builds the workload image, pushes it to KO_DOCKER_REPO, and
