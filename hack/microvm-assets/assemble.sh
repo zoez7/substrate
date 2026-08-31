@@ -21,7 +21,7 @@
 # Produces, under $OUT, the five assets named as the SandboxConfig expects:
 #   cloud-hypervisor  virtiofsd  vmlinux  rootfs.img  configuration-clh.toml
 # The DOWNLOADED assets are reproducible, so paste their sha256 sums into the
-# manifest (demos/counter/counter-microvm.yaml.tmpl). That now includes virtiofsd on
+# manifest (manifests/microvm/sandboxconfig-microvm.yaml.tmpl). That now includes virtiofsd on
 # amd64 (upstream prebuilt); on arm64 virtiofsd is still built from source
 # (non-reproducible bytes), so its sha is NOT pinned there — run-microvm-demo.sh
 # computes it from the staged binary and injects it at deploy.
@@ -153,7 +153,7 @@ done
 asset_stamp > "${OUT}/${STAMP_FILE}"
 "${OUT}/virtiofsd" --version 2>/dev/null | head -1 || true
 echo
-echo ">> sha256 (paste the DOWNLOADED assets into counter-microvm.yaml.tmpl; that"
+echo ">> sha256 (paste the DOWNLOADED assets into sandboxconfig-microvm.yaml.tmpl; that"
 echo ">> includes virtiofsd on amd64 (prebuilt). The arm64 virtiofsd is built from"
 echo ">> source, so its sha is injected at deploy by run-microvm-demo.sh, not pinned):"
 sha256sum cloud-hypervisor virtiofsd vmlinux rootfs.img configuration-clh.toml

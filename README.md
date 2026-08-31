@@ -102,9 +102,9 @@ hack/install-ate-kind.sh --deploy-demo-counter
 # install kubectl-ate
 go install ./cmd/kubectl-ate
 
-# create an atespace (required before creating actors), then a counter actor in it
-kubectl ate create atespace demo
-kubectl ate create actor my-counter-1 -a demo --template=ate-demo-counter/counter
+# create a counter actor in the demo's atespace (--template-ref resolves the
+# template by name within the actor's atespace)
+kubectl ate create actor my-counter-1 -a ate-demo-counter --template-ref counter
 
 # port-forward the network router to bind to local port `8000`
 kubectl port-forward -n ate-system svc/atenet-router 8000:80
@@ -112,7 +112,7 @@ kubectl port-forward -n ate-system svc/atenet-router 8000:80
 
 3. In a **separate terminal**, send an HTTP request to increment the counter:
 ```shell
-curl -X POST -H "Host: my-counter-1.demo.actors.resources.substrate.ate.dev" -i http://localhost:8000/
+curl -X POST -H "Host: my-counter-1.ate-demo-counter.actors.resources.substrate.ate.dev" -i http://localhost:8000/
 ```
 
 ### GKE Quickstart (Development)
@@ -191,7 +191,7 @@ If you need to delete the local `kind` cluster and its registry (if it was creat
 
 We provide several sample applications demonstrating Agent Substrate's capabilities:
 
-1. **[Counter Demo](demos/counter/README.md)**: A stateful Go HTTP server demonstrating state preservation across suspends/resumes, and dynamic CRD routing.
+1. **[Counter Demo](demos/counter/README.md)**: A stateful Go HTTP server demonstrating state preservation across suspends/resumes, and dynamic actor routing.
 2. **[Sandbox Demo (Antigravity)](demos/sandbox/README.md)**: A secure, sandboxed execution environment (running Alpine Linux) that allows arbitrary shell execution while preserving filesystem state across sessions.
 3. **[Claude Code Multiplex](demos/claude-code-multiplex/README.md)**: Demonstrates oversubscribing physical hardware by multiplexing multiple Claude Code agents onto a limited pool of workers.
 4. **[Multi-Template](demos/multi-template/README.md)**: Two `ActorTemplate`s running different binaries share one `WorkerPool`, across three namespaces.

@@ -66,26 +66,26 @@ type SubstrateFixture struct {
 	DeployWith string
 }
 
-// SubstrateCounterFixture returns the substrate-resource counter demo for the
-// sandbox class under test. E2E_SUBSTRATE_TEMPLATE_ATESPACE /
+// SubstrateCounterFixture returns the counter demo's substrate ActorTemplate
+// for the sandbox class under test. E2E_SUBSTRATE_TEMPLATE_ATESPACE /
 // E2E_SUBSTRATE_TEMPLATE_NAME / E2E_SUBSTRATE_POOL_NAMESPACE /
 // E2E_SUBSTRATE_POOL_NAME override it, for a cluster that installs the
 // fixture somewhere else.
 func SubstrateCounterFixture() SubstrateFixture {
 	f := SubstrateFixture{
-		Atespace:      "ate-demo-counter-substrate",
+		Atespace:      "ate-demo-counter",
 		Name:          "counter",
-		PoolNamespace: "ate-demo-counter-substrate",
-		PoolName:      "counter-substrate",
-		DeployWith:    "hack/install-ate-kind.sh --deploy-demo-counter-substrate",
+		PoolNamespace: "ate-demo-counter",
+		PoolName:      "counter",
+		DeployWith:    "hack/install-ate-kind.sh --deploy-demo-counter",
 	}
 	if IsMicroVM() {
 		f = SubstrateFixture{
-			Atespace:      "ate-demo-counter-substrate-microvm",
+			Atespace:      "ate-demo-counter-microvm",
 			Name:          "counter-microvm",
-			PoolNamespace: "ate-demo-counter-substrate-microvm",
-			PoolName:      "counter-substrate-microvm",
-			DeployWith:    "hack/install-ate-kind.sh --deploy-demo-counter-substrate-microvm",
+			PoolNamespace: "ate-demo-counter-microvm",
+			PoolName:      "counter-microvm",
+			DeployWith:    "hack/install-ate-kind.sh --deploy-demo-counter-microvm",
 		}
 	}
 	if v := os.Getenv("E2E_SUBSTRATE_TEMPLATE_ATESPACE"); v != "" {

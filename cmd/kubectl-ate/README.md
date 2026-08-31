@@ -174,7 +174,7 @@ kubectl ate delete actor-template <name> -a <atespace>
 ```
 
 See
-[`demos/counter/counter-substrate-template.yaml.tmpl`](../../demos/counter/counter-substrate-template.yaml.tmpl)
+[`demos/counter/counter-template.yaml.tmpl`](../../demos/counter/counter-template.yaml.tmpl)
 for a complete manifest example.
 
 #### `kubectl ate get actor-templates` output columns

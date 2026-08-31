@@ -30,7 +30,7 @@ it as a device, which is what places micro-VM workers there.
    ARCH=arm64 hack/microvm-assets/assemble.sh
    ```
    Copy the printed sha256 sums into the `SandboxConfig` `spec.assets` in
-   `demos/counter/counter-microvm.yaml.tmpl` (the committed values are arm64; other arches differ).
+   `manifests/microvm/sandboxconfig-microvm.yaml.tmpl` (the committed values are arm64; other arches differ).
 
 2. **Bring up the cluster + control plane:**
    ```sh
@@ -43,10 +43,12 @@ it as a device, which is what places micro-VM workers there.
    OUT="$PWD/microvm-assets-arm64" hack/microvm-assets/stage-to-rustfs.sh
    ```
 
-4. **Apply the demo + drive it:**
+4. **Deploy the demo + drive it:**
    ```sh
-   BUCKET_NAME=ate-snapshots envsubst < demos/counter/counter-microvm.yaml.tmpl | kubectl apply -f -
+   hack/install-ate-kind.sh --deploy-demo-counter-microvm
    ```
+   That applies the worker pool, creates the `counter-microvm` ActorTemplate through the ate
+   API, and waits for its golden snapshot.
    Create an actor from `counter-microvm`, hit the in-RAM counter to increment it, suspend
    (checkpoint), resume on a different worker pod, and confirm the count continues — proving the
    guest-memory snapshot round-tripped across pods.

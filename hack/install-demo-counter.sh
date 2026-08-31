@@ -15,8 +15,18 @@
 # limitations under the License.
 #
 # This is sourced as part of install-ate.sh. Do not run directly.
+#
+# The counter demo: the worker pool is a CRD manifest, and the ActorTemplate
+# is created through the ate API with `kubectl ate create actor-template`.
+# The micro-VM variant additionally needs the cluster-wide `microvm`
+# SandboxConfig from hack/install-microvm-deps.sh --install.
 
 ATE_DEMOS+=(demo-counter) # register demo-counter
+# The micro-VM variant is its own demo rather than a flag on demo-counter:
+# that gets it into --help and into delete_all's teardown sweep for free, and
+# the two can be installed side by side (the suites run against whichever the
+# sandbox class under test selects).
+ATE_DEMOS+=(demo-counter-microvm) # register demo-counter-microvm
 
 demo-counter_usage() {
   echo "  --deploy-demo-counter-with-external-volume    Deploy demo-counter with external volume validation"
@@ -34,52 +44,68 @@ demo-counter_cmdline() {
   return 0
 }
 
+demo-counter-microvm_cmdline() {
+  case "${1}" in
+    --deploy-demo-counter-microvm) demo-counter-microvm_deploy ;;
+    --delete-demo-counter-microvm) demo-counter-microvm_delete ;;
+    *)
+      return 1
+      ;;
+  esac
+  return 0
+}
+
 demo-counter_deploy() {
   local with_external_volume="${1:-false}"
-  log_step "demo-counter_deploy (with_external_volume=${with_external_volume})"
-  ensure_crds
 
+  # The external-volume stanzas live in the template manifest as placeholders:
+  # dropped for the plain deploy, substituted (in protojson shape) when the
+  # validation path is on.
   local validate_cmd=("-e" "/\${VALIDATE_EXISTING_FILE_PATH_ARG}/d")
   local ext_vol_mount_cmd=("-e" "/\${EXTERNAL_VOLUME_MOUNTS}/d")
   local ext_vol_spec_cmd=("-e" "/\${EXTERNAL_VOLUMES}/d")
   if [[ "${with_external_volume}" == "true" ]]; then
-    # csi-hostpath-sc only exists when hack/setup-csi-hostpath-kind.sh has run (via SETUP_CSI=true).
-    # Otherwise fall back to the default "standard" StorageClass.
+    # csi-hostpath-sc only exists when hack/setup-csi-hostpath-kind.sh has run
+    # (via SETUP_CSI=true). Otherwise fall back to the default "standard"
+    # StorageClass.
     local storage_class="standard"
     if [[ "${SETUP_CSI:-false}" == "true" ]]; then
       storage_class="csi-hostpath-sc"
     fi
 
-    validate_cmd=("-e" "s|\${VALIDATE_EXISTING_FILE_PATH_ARG}|    - --validate-existing-file-path=/external-data/test.txt|g")
-    ext_vol_mount_cmd=("-e" "s|\${EXTERNAL_VOLUME_MOUNTS}|    - name: external-data\n      mountPath: /external-data|g")
-    ext_vol_spec_cmd=("-e" "s|\${EXTERNAL_VOLUMES}|  - name: external-data\n    externalVolumeTemplate:\n      capacity: 1Gi\n      storageClassName: ${storage_class}|g")
+    validate_cmd=("-e" "s|\${VALIDATE_EXISTING_FILE_PATH_ARG}|  - --validate-existing-file-path=/external-data/test.txt|g")
+    ext_vol_mount_cmd=("-e" "s|\${EXTERNAL_VOLUME_MOUNTS}|  - name: external-data\n    mountPath: /external-data|g")
+    ext_vol_spec_cmd=("-e" "s|\${EXTERNAL_VOLUMES}|- name: external-data\n  type: ExternalVolumeTemplate\n  externalVolumeTemplate:\n    capacity: 1Gi\n    storageClassName: ${storage_class}|g")
   fi
 
-  sed -e "s|\${BUCKET_NAME}|${BUCKET_NAME}|g" \
-      "${validate_cmd[@]}" \
-      "${ext_vol_mount_cmd[@]}" \
-      "${ext_vol_spec_cmd[@]}" \
-      demos/counter/counter.yaml.tmpl \
-    | run_ko apply -f -
-
-  # Wait for the demo to be fully ready before returning. On a cold cluster the
-  # first ActorTemplate golden snapshot pays one-time costs (downloading the
-  # gVisor runsc binary, first gVisor pod start, image pulls). Blocking here
-  # means callers -- notably the e2e suite, which creates its own ActorTemplate
-  # with a tight readiness deadline -- run against an already-warm node instead
-  # of racing that cold-start work.
-  log_step "Waiting for counter demo to be ready..."
-  wait_for_pool_rollout_fatal counter ate-demo-counter
-  run_kubectl_fatal wait --for=condition=Ready actortemplate/counter -n ate-demo-counter --timeout=300s
+  deploy_substrate_demo demo-counter \
+    demos/counter/counter.yaml.tmpl \
+    demos/counter/counter-template.yaml.tmpl \
+    ate-demo-counter counter counter 300 \
+    "${validate_cmd[@]}" "${ext_vol_mount_cmd[@]}" "${ext_vol_spec_cmd[@]}"
 }
 
 demo-counter_delete() {
-  log_step "demo-counter_delete"
-  delete_demo_actors ate-demo-counter counter
-  sed -e "s|\${BUCKET_NAME}|${BUCKET_NAME}|g" \
-      -e "/\${VALIDATE_EXISTING_FILE_PATH_ARG}/d" \
-      -e "/\${EXTERNAL_VOLUME_MOUNTS}/d" \
-      -e "/\${EXTERNAL_VOLUMES}/d" \
-      demos/counter/counter.yaml.tmpl \
-    | run_kubectl delete --ignore-not-found -f -
+  delete_substrate_demo demo-counter \
+    demos/counter/counter.yaml.tmpl \
+    ate-demo-counter counter
+}
+
+demo-counter-microvm_usage() {
+  echo "  Needs hack/install-microvm-deps.sh --install to have run (cluster-wide microvm SandboxConfig)."
+}
+
+demo-counter-microvm_deploy() {
+  # 600s golden budget: a micro-VM golden is a cloud-hypervisor cold boot
+  # plus checkpoint, on nested KVM in CI.
+  deploy_substrate_demo demo-counter-microvm \
+    demos/counter/counter-microvm.yaml.tmpl \
+    demos/counter/counter-microvm-template.yaml.tmpl \
+    ate-demo-counter-microvm counter-microvm counter-microvm 600
+}
+
+demo-counter-microvm_delete() {
+  delete_substrate_demo demo-counter-microvm \
+    demos/counter/counter-microvm.yaml.tmpl \
+    ate-demo-counter-microvm counter-microvm
 }

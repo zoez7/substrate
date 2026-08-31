@@ -30,7 +30,7 @@ import (
 )
 
 // counterExtraPort is the counter demo's second listener (see
-// demos/counter/counter.yaml.tmpl's --extra-port flag), distinct from the
+// demos/counter/counter-template.yaml.tmpl's --extra-port flag), distinct from the
 // primary port 80 every other assertion in this suite addresses.
 const counterExtraPort = 9090
 

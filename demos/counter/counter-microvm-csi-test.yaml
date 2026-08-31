@@ -12,6 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Manual manifest for exercising the CSI external-volume path on a micro-VM
+# pool (kind + hack/setup-csi-hostpath-kind.sh). Apply this pool with
+# `ko apply -f -`, then create the template from
+# counter-microvm-csi-test-template.yaml:
+#
+#   kubectl ate create atespace ate-demo-counter-microvm-csi
+#   ko resolve -f demos/counter/counter-microvm-csi-test-template.yaml \
+#     | kubectl ate create actor-template -f -
+
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -31,37 +40,3 @@ spec:
   sandboxClass: microvm
   sandboxConfigName: microvm
   workerImage: ko://github.com/agent-substrate/substrate/cmd/ateom-microvm
-
----
-
-apiVersion: ate.dev/v1alpha1
-kind: ActorTemplate
-metadata:
-  name: counter-microvm-csi
-  namespace: ate-demo-counter-microvm-csi
-spec:
-  sandboxClass: microvm
-  containers:
-  - name: counter
-    image: ko://github.com/agent-substrate/substrate/demos/counter
-    readyz:
-      httpGet:
-        path: /readyz
-        port: 80
-    volumeMounts:
-    - name: data
-      mountPath: /home/counter
-  workerSelector:
-    matchLabels:
-      workload: counter-microvm-csi
-  snapshotsConfig:
-    onPause: Full
-    onCommit: Data
-    onResume:
-      fromData: Golden
-    location: gs://ate-snapshots/ate-demo-counter-microvm-csi/
-  volumes:
-  - name: data
-    externalVolumeTemplate:
-      capacity: 1Gi
-      storageClassName: csi-hostpath-sc
