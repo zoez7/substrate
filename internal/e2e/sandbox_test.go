@@ -229,6 +229,39 @@ func TestEgressFixture(t *testing.T) {
 	})
 }
 
+// TestSubstrateEgressFixture covers both knobs the networking suite's egress
+// tests read: the class and the egress gateway variant pick the fixture.
+func TestSubstrateEgressFixture(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		class    string
+		mitm     string
+		variant  string
+		template string
+	}{
+		{"gvisor", "", "", "", "egress"},
+		{"microvm", SandboxClassMicroVM, "", "-microvm", "egress-microvm"},
+		{"gvisor mitm", "", "1", "-mitm", "egress-mitm"},
+		{"microvm mitm", SandboxClassMicroVM, "1", "-microvm-mitm", "egress-microvm-mitm"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(sandboxClassEnv, tc.class)
+			t.Setenv("E2E_EGRESS_MITM", tc.mitm)
+			got := SubstrateEgressFixture()
+			want := SubstrateFixture{
+				Atespace:      "ate-demo-egress" + tc.variant,
+				Name:          tc.template,
+				PoolNamespace: "ate-demo-egress" + tc.variant,
+				PoolName:      "egress" + tc.variant,
+				DeployWith:    "hack/install-ate-kind.sh --deploy-demo-egress" + tc.variant,
+			}
+			if got != want {
+				t.Errorf("SubstrateEgressFixture() = %+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
 // TestSubstrateCounterFixture covers the knob every counter-based suite reads:
 // the class picks the fixture, and the explicit environment overrides still
 // win.

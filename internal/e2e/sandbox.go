@@ -103,6 +103,30 @@ func SubstrateCounterFixture() SubstrateFixture {
 	return f
 }
 
+// SubstrateEgressFixture returns the substrate egress demo the networking
+// suite's egress tests build their actors from, for the sandbox class under
+// test and the egress gateway variant deployed. E2E_EGRESS_MITM selects the
+// MITM variant, which trusts only the egress gateway CA and REQUIRES an
+// sdsmint install (--experimental-use-sdsmint).
+func SubstrateEgressFixture() SubstrateFixture {
+	variant := ""
+	if IsMicroVM() {
+		variant = "-" + SandboxClassMicroVM
+	}
+	if os.Getenv("E2E_EGRESS_MITM") != "" {
+		variant += "-mitm"
+	}
+	return SubstrateFixture{
+		// The atespace doubles as the pool's k8s namespace, and the template
+		// carries the pool's name.
+		Atespace:      "ate-demo-egress" + variant,
+		Name:          "egress" + variant,
+		PoolNamespace: "ate-demo-egress" + variant,
+		PoolName:      "egress" + variant,
+		DeployWith:    "hack/install-ate-kind.sh --deploy-demo-egress" + variant,
+	}
+}
+
 // EgressFixture returns the egress demo for the sandbox class under test.
 func EgressFixture() Fixture {
 	if IsMicroVM() {

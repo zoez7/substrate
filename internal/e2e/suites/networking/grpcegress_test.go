@@ -76,7 +76,7 @@ func TestActorEgressGRPC(t *testing.T) {
 	ctx := context.Background()
 	target := e2e.DeployServerPod(t, ctx, grpcEcho).Address()
 
-	actorName, _ := createAndResumeActor(t, ctx, "egress-grpc", egressFixture())
+	actorName, _ := createAndResumeSubstrateActor(t, ctx, "egress-grpc", e2e.SubstrateEgressFixture())
 	router := mustRouterClient(t, ctx)
 	defer router.Close()
 
