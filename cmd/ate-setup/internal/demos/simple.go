@@ -18,22 +18,12 @@ import (
 	"context"
 
 	"github.com/spf13/pflag"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/kube"
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/log"
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/render"
 	"github.com/agent-substrate/substrate/cmd/ate-setup/internal/steps"
 )
-
-// actorTemplateGVK identifies the resource the CRD-form demos wait on: an
-// ActorTemplate goes Ready once its golden snapshot has been built. It goes
-// away with the last CRD-form demo.
-var actorTemplateGVK = schema.GroupVersionKind{
-	Group:   "ate.dev",
-	Version: "v1alpha1",
-	Kind:    "ActorTemplate",
-}
 
 // bucketNamePlaceholder is substituted into every demo template with the
 // snapshot bucket for this environment.
@@ -71,14 +61,6 @@ func RenderTemplateManifest(e *steps.Env, relPath string, extraValues map[string
 	return Render(e, relPath, extraValues, drop)
 }
 
-// WaitActorTemplateReady blocks until a CRD ActorTemplate's golden snapshot is
-// built, the `kubectl wait --for=condition=Ready actortemplate/...` of the demo
-// scripts. Substrate templates wait through Env.WaitActorTemplateGolden
-// instead.
-func WaitActorTemplateReady(ctx context.Context, e *steps.Env, namespace, name string) error {
-	return e.Kube.WaitCondition(ctx, actorTemplateGVK, namespace, name, "Ready", steps.DemoTimeout)
-}
-
 // Simple covers the demos that are one workload manifest plus a fixed set of
 // ActorTemplates: render, ko apply, create the templates, wait; and on delete,
 // remove the actors, the templates, then the rendered manifest.
@@ -93,8 +75,7 @@ type Simple struct {
 	Short string
 
 	// Template is the *.yaml.tmpl path of the Kubernetes manifest, relative to
-	// the repository root: the namespace and WorkerPool, and, for demos not
-	// yet converted to substrate ActorTemplates, the ActorTemplate CRDs too.
+	// the repository root: the demo's namespace and WorkerPool.
 	Template string
 
 	// TemplateManifests are the demo's substrate ActorTemplate manifests,
@@ -110,11 +91,6 @@ type Simple struct {
 	// Deployments are the Deployments to wait for at deploy time, in order.
 	// The WorkerPool controller names each Deployment after its WorkerPool.
 	Deployments []steps.TemplateRef
-
-	// ActorTemplates are the demo's CRD-form ActorTemplates, applied as part
-	// of Template. Their actors are removed before the manifests at delete
-	// time. Converted demos list their templates in TemplateManifests instead.
-	ActorTemplates []steps.TemplateRef
 
 	// SkipReadinessWait deploys without blocking on the ActorTemplates. The
 	// sandbox demo sets this: it has no long-lived workload, and its template
@@ -209,18 +185,13 @@ func (d *Simple) WaitReady(ctx context.Context, e *steps.Env) error {
 			return err
 		}
 	}
-	for _, ref := range d.ActorTemplates {
-		if err := WaitActorTemplateReady(ctx, e, ref.Atespace, ref.Name); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
-// templateRefs collects every template the demo owns, CRD and substrate alike,
-// for actor cleanup at delete time.
+// templateRefs collects the demo's templates for actor and template cleanup
+// at delete time.
 func (d *Simple) templateRefs() []steps.TemplateRef {
-	refs := append([]steps.TemplateRef{}, d.ActorTemplates...)
+	refs := make([]steps.TemplateRef, 0, len(d.TemplateManifests))
 	for _, m := range d.TemplateManifests {
 		refs = append(refs, m.Ref)
 	}
@@ -232,14 +203,8 @@ func (d *Simple) Delete(ctx context.Context, e *steps.Env) error {
 	if err := e.DeleteDemoActors(ctx, d.templateRefs()...); err != nil {
 		return err
 	}
-	if len(d.TemplateManifests) > 0 {
-		refs := make([]steps.TemplateRef, 0, len(d.TemplateManifests))
-		for _, m := range d.TemplateManifests {
-			refs = append(refs, m.Ref)
-		}
-		if err := e.DeleteActorTemplates(ctx, refs...); err != nil {
-			return err
-		}
+	if err := e.DeleteActorTemplates(ctx, d.templateRefs()...); err != nil {
+		return err
 	}
 	manifest, err := Render(e, d.Template, nil, ExternalVolumePlaceholders)
 	if err != nil {
