@@ -25,12 +25,16 @@ const namespace = "ate-demo-sandbox"
 
 func init() {
 	demos.Register(&demos.Simple{
-		DemoName:       "demo-sandbox",
-		Short:          "An on-demand sandbox actor driven by the sandbox client",
-		Template:       "demos/sandbox/sandbox.yaml.tmpl",
-		ActorTemplates: []steps.TemplateRef{{Atespace: namespace, Name: "sandbox-template"}},
+		DemoName: "demo-sandbox",
+		Short:    "An on-demand sandbox actor driven by the sandbox client",
+		Template: "demos/sandbox/sandbox.yaml.tmpl",
+		TemplateManifests: []steps.TemplateManifest{{
+			Path: "demos/sandbox/sandbox-template.yaml.tmpl",
+			Ref:  steps.TemplateRef{Atespace: namespace, Name: "sandbox-template"},
+		}},
 		// There is no workload to come up, and the template is exercised on
-		// demand, so the install does not block on readiness.
+		// demand, so the install does not block on readiness (the template
+		// itself is still created).
 		SkipReadinessWait: true,
 	})
 }

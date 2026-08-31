@@ -34,27 +34,29 @@ Use the core installation script to build the image and apply the resolved manif
 
 This command will:
 - Build the sandbox server image based on Alpine Linux.
-- Create the `ate-demo-sandbox` namespace.
-- Create the `WorkerPool` and `ActorTemplate`.
+- Create the `ate-demo-sandbox` namespace and the `WorkerPool`.
+- Create the `ate-demo-sandbox` atespace and the `sandbox-template` actor
+  template through the ate API (`kubectl ate create actor-template`), a
+  substrate resource rather than a CRD.
 
-Wait until the template is ready:
+The install does not block on the template's golden snapshot (the sandbox
+client exercises the template on demand); check it with:
 ```bash
-kubectl wait --for=condition=Ready actortemplate/sandbox-template -n ate-demo-sandbox --timeout=5m
+kubectl ate get actor-template sandbox-template -a ate-demo-sandbox
 ```
 
 ### 2. Create a Sandbox Actor
 
-Actors live in an **atespace**, which must exist before you create actors in it. Create one (e.g., `demo`), then create the sandbox actor with a chosen name (e.g., `my-sandbox-1`):
+Create the sandbox actor with a chosen name (e.g., `my-sandbox-1`) in the
+demo's atespace, which the deploy step already created (`--template-ref`
+resolves the template by name within the actor's own atespace):
 
 ```bash
 # Install the CLI as a kubectl plugin if not already installed
 go install ./cmd/kubectl-ate
 
-# Create the atespace (required before creating actors).
-kubectl ate create atespace demo
-
-# Create the actor in the atespace, using the sandbox template.
-kubectl ate create actor my-sandbox-1 -a demo --template ate-demo-sandbox/sandbox-template
+# Create the actor from the sandbox template.
+kubectl ate create actor my-sandbox-1 -a ate-demo-sandbox --template-ref sandbox-template
 ```
 
 ### 3. Port-Forward Services
@@ -76,7 +78,7 @@ Build and run the client REPL:
 ```bash
 go build -o bin/sandbox-client ./demos/sandbox/client
 
-./bin/sandbox-client --ateapi=localhost:8080 --atenet=localhost:8000 --atespace=demo --name=my-sandbox-1
+./bin/sandbox-client --ateapi=localhost:8080 --atenet=localhost:8000 --atespace=ate-demo-sandbox --name=my-sandbox-1
 ```
 
 Once in the `sandbox>` prompt, you can run commands:
@@ -90,10 +92,9 @@ sandbox> cat test.txt
 
 Type `exit` to leave. This will automatically trigger the suspension of the actor.
 
-To permanently delete the suspended actor, then the now-empty atespace:
+To permanently delete the suspended actor:
 ```bash
-kubectl ate delete actor my-sandbox-1 -a demo
-kubectl ate delete atespace demo
+kubectl ate delete actor my-sandbox-1 -a ate-demo-sandbox
 ```
 
 ## How to Uninstall

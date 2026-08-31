@@ -12,6 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Manual manifest for exercising multiple external volumes (hostpath + NFS
+# CSI). Apply this pool with `ko apply -f -`, then create the template from
+# manual-test-multi-template.yaml:
+#
+#   kubectl ate create atespace ate-manual-test-multi
+#   ko resolve -f demos/sandbox/manual-test-multi-template.yaml \
+#     | kubectl ate create actor-template -f -
+
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -27,36 +35,3 @@ metadata:
 spec:
   replicas: 1
   workerImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
----
-apiVersion: ate.dev/v1alpha1
-kind: ActorTemplate
-metadata:
-  name: sandbox-template
-  namespace: ate-manual-test-multi
-spec:
-  workerSelector:
-    matchLabels:
-      workload: sandbox
-  containers:
-  - name: sandbox
-    image: ko://github.com/agent-substrate/substrate/demos/sandbox
-    command: ["/ko-app/sandbox"]
-    env:
-    - name: PORT
-      value: "80"
-    volumeMounts:
-    - name: vol-hostpath
-      mountPath: /hostpath-data
-    - name: vol-nfs
-      mountPath: /nfs-data
-  snapshotsConfig:
-    location: gs://ate-snapshots/ate-manual-test-multi/
-  volumes:
-  - name: vol-hostpath
-    externalVolumeTemplate:
-      capacity: 1Gi
-      storageClassName: csi-hostpath-sc
-  - name: vol-nfs
-    externalVolumeTemplate:
-      capacity: 1Gi
-      storageClassName: csi-nfs-sc
