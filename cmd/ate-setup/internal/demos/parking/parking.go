@@ -25,10 +25,13 @@ const namespace = "ate-demo-parking"
 
 func init() {
 	demos.Register(&demos.Simple{
-		DemoName:       "demo-parking",
-		Short:          "Actor parking and unparking on a small WorkerPool",
-		Template:       "demos/parking/parking.yaml.tmpl",
-		Deployments:    []steps.TemplateRef{{Atespace: namespace, Name: "parking"}},
-		ActorTemplates: []steps.TemplateRef{{Atespace: namespace, Name: "parking"}},
+		DemoName:    "demo-parking",
+		Short:       "Actor parking and unparking on a small WorkerPool",
+		Template:    "demos/parking/parking.yaml.tmpl",
+		Deployments: []steps.TemplateRef{{Atespace: namespace, Name: "parking"}},
+		TemplateManifests: []steps.TemplateManifest{{
+			Path: "demos/parking/parking-template.yaml.tmpl",
+			Ref:  steps.TemplateRef{Atespace: namespace, Name: "parking"},
+		}},
 	})
 }
