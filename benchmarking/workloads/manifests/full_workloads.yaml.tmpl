@@ -19,6 +19,10 @@
 #  * The non-sleep workloads currently do not run, since there is not enough disk space to take the golden snapshot.
 #
 # Once disk space is improved and scheduling optimizations are introduced, we should use this file.
+#
+# The ActorTemplates are substrate resources, not CRDs: they live in the
+# full-templates/ directory and are created through the ate API with
+# `kubectl ate create actor-template`.
 
 apiVersion: v1
 kind: Namespace
@@ -38,80 +42,3 @@ spec:
   replicas: 5
   workerImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
 
----
-
-apiVersion: ate.dev/v1alpha1
-kind: ActorTemplate
-metadata:
-  name: sleep
-  namespace: benchmark-workloads
-spec:
-  containers:
-  - name: sleep
-    image: busybox@sha256:1487d0af5f52b4ba31c7e465126ee2123fe3f2305d638e7827681e7cf6c83d5e
-    command: ["/bin/sleep", "1000000"]
-  workerSelector:
-    matchLabels:
-      workload: benchmark-ateom
-  snapshotsConfig:
-    location: gs://${BUCKET_NAME}/benchmark-workloads/sleep/
-
----
-
-apiVersion: ate.dev/v1alpha1
-kind: ActorTemplate
-metadata:
-  name: usermem
-  namespace: benchmark-workloads
-spec:
-  containers:
-  - name: usermem
-    image: containerstack/alpine-stress:latest
-    command: ["stress", "--vm", "1", "--vm-bytes", "1G", "--vm-keep", "--vm-hang", "0"]
-  workerSelector:
-    matchLabels:
-      workload: benchmark-ateom
-  snapshotsConfig:
-    location: gs://${BUCKET_NAME}/benchmark-workloads/usermem/
-
----
-
-apiVersion: ate.dev/v1alpha1
-kind: ActorTemplate
-metadata:
-  name: kernelmem
-  namespace: benchmark-workloads
-spec:
-  containers:
-  - name: kernelmem
-    image: containerstack/alpine-stress:latest
-    command: ["sh", "-c", "find /; for i in $(seq 50000); do sleep 10000 & done; sleep 10000"]
-  workerSelector:
-    matchLabels:
-      workload: benchmark-ateom
-  snapshotsConfig:
-    location: gs://${BUCKET_NAME}/benchmark-workloads/kernelmem/
-
----
-
-apiVersion: ate.dev/v1alpha1
-kind: ActorTemplate
-metadata:
-  name: glutton
-  namespace: benchmark-workloads
-spec:
-  containers:
-  - name: glutton
-    image: ko://github.com/agent-substrate/substrate/cmd/benchmarking/glutton
-    # Port 80 is the only inbound port nftables forwards from the worker pod
-    # into the actor sandbox (see cmd/ateom-gvisor/main.go).
-    command:
-    - "/ko-app/glutton"
-    - "--grpc-listen-addr=:80"
-    - "--metrics-listen-addr=:9090"
-    - "--data-dir=/tmp/glutton"
-  workerPoolRef:
-    namespace: benchmark-workloads
-    name: benchmark-ateom
-  snapshotsConfig:
-    location: gs://${BUCKET_NAME}/benchmark-workloads/glutton/

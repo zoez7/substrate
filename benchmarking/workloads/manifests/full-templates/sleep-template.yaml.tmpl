@@ -1,0 +1,33 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Substrate ActorTemplate resource (protojson-shaped ateapipb.ActorTemplate,
+# NOT the ate.dev/v1alpha1 CRD): the sleep workload of the full benchmark set
+# (see full_workloads.yaml.tmpl, which is not wired into deploy.sh yet).
+
+metadata:
+  atespace: benchmark-workloads
+  name: sleep
+workerSelector:
+  matchLabels:
+    workload: benchmark-ateom
+containers:
+- name: sleep
+  image: busybox@sha256:1487d0af5f52b4ba31c7e465126ee2123fe3f2305d638e7827681e7cf6c83d5e
+  command: ["/bin/sleep", "1000000"]
+snapshotsConfig:
+  storageLocation: gs://${BUCKET_NAME}/benchmark-workloads/sleep/
+sandboxConfig:
+  sandboxClass: SANDBOX_CLASS_GVISOR
+  configName: gvisor-default

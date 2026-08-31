@@ -30,6 +30,11 @@ if [[ -z "${BUCKET_NAME:-}" ]]; then
 fi
 
 MANIFEST_TEMPLATE="benchmarking/workloads/manifests/workloads.yaml.tmpl"
+# The ActorTemplates are substrate resources (protojson manifests), created
+# through the ate API rather than applied as CRDs.
+TEMPLATE_DIR="benchmarking/workloads/manifests/templates"
+TEMPLATES=(sleep glutton glutton-durdir-data glutton-durdir-full)
+ATESPACE="benchmark-workloads"
 
 if [[ ! -f "${MANIFEST_TEMPLATE}" ]]; then
   echo "Error: ${MANIFEST_TEMPLATE} not found in $(pwd)" >&2
@@ -90,49 +95,79 @@ resolve_otlp_endpoint() {
   fi
 }
 
-substitute() {
-  # SandboxConfig names are pinned per class (rather than defaulted) so a stale
-  # config from a dirty teardown fails loudly instead of silently binding this
-  # pool. gvisor-default is applied by hack/install-ate.sh; microvm is applied
-  # by hack/install-microvm-deps.sh.
-  local sandbox_config_name
+kubectl_ate() {
+  go run ./cmd/kubectl-ate "$@"
+}
+
+# sandbox_config_name pins the SandboxConfig per class (rather than defaulting)
+# so a stale config from a dirty teardown fails loudly instead of silently
+# binding this pool. gvisor-default is applied by hack/install-ate.sh; microvm
+# is applied by hack/install-microvm-deps.sh.
+sandbox_config_name() {
   case "${SANDBOX_CLASS}" in
-    gvisor)  sandbox_config_name="gvisor-default" ;;
-    microvm) sandbox_config_name="microvm"        ;;
+    gvisor)  echo "gvisor-default" ;;
+    microvm) echo "microvm"        ;;
   esac
+}
+
+sandbox_class_enum() {
+  case "${SANDBOX_CLASS}" in
+    gvisor)  echo "SANDBOX_CLASS_GVISOR"  ;;
+    microvm) echo "SANDBOX_CLASS_MICROVM" ;;
+  esac
+}
+
+substitute() {
   sed -e "s|\${BUCKET_NAME}|${BUCKET_NAME}|g" \
       -e "s|\${WORKER_COUNT}|${WORKER_COUNT}|g" \
       -e "s|\${SANDBOX_CLASS}|${SANDBOX_CLASS}|g" \
-      -e "s|\${SANDBOX_CONFIG_NAME}|${sandbox_config_name}|g" \
+      -e "s|\${SANDBOX_CLASS_ENUM}|$(sandbox_class_enum)|g" \
+      -e "s|\${SANDBOX_CONFIG_NAME}|$(sandbox_config_name)|g" \
       -e "s|\${OTLP_ENDPOINT}|${OTLP_ENDPOINT}|g" \
       -e "s|\${ACTOR_MEMORY}|${ACTOR_MEMORY}|g" \
-      "${MANIFEST_TEMPLATE}"
+      "$1"
 }
 
 deploy() {
   resolve_otlp_endpoint
   echo "Deploying workloads (worker_count=${WORKER_COUNT}, actor_memory=${ACTOR_MEMORY}, otlp_endpoint=${OTLP_ENDPOINT})..."
-  # ActorTemplate.spec has the rule `self == oldSelf` (see
-  # pkg/api/v1alpha1/actortemplate_types.go). Thus the API server rejects an
-  # apply that changes a template. A value that changes for each run — the OTLP
-  # endpoint or the sandbox class — needs the removal of the old template
-  # first. This removal is safe, because the benchmark automation deletes the
-  # actors between the tests.
-  kubectl delete actortemplate --namespace=benchmark-workloads \
-    --all --ignore-not-found
-  substitute | hack/run-tool.sh ko apply -f -
+  substitute "${MANIFEST_TEMPLATE}" | hack/run-tool.sh ko apply -f -
   echo "Waiting for worker pool to be ready (timeout: ${WAIT_TIMEOUT})..."
   kubectl wait --for=create deployment/benchmark-ateom \
     --namespace=benchmark-workloads --timeout="${WAIT_TIMEOUT}"
   kubectl rollout status deployment/benchmark-ateom \
     --namespace=benchmark-workloads --timeout="${WAIT_TIMEOUT}"
+
+  kubectl_ate create atespace "${ATESPACE}" >/dev/null 2>&1 \
+    || true # already exists
+  local name
+  for name in "${TEMPLATES[@]}"; do
+    # Actor templates are immutable (no update RPC), and values that change
+    # for each run — the OTLP endpoint, the sandbox class, the memory limit —
+    # need the removal of the old template first. This removal is safe,
+    # because the benchmark automation deletes the actors between the tests.
+    kubectl_ate delete actor-template "${name}" -a "${ATESPACE}" 2>/dev/null \
+      || true # may not exist
+    # ko resolve builds the ko:// image references and replaces them with
+    # pushed digests before the manifest reaches kubectl-ate.
+    substitute "${TEMPLATE_DIR}/${name}-template.yaml.tmpl" \
+      | hack/run-tool.sh ko resolve -f - \
+      | kubectl_ate create actor-template -f -
+  done
 }
 
 delete() {
   echo "Deleting workloads..."
-  # The template contains ko:// image references; route through `ko delete`
-  # so they get resolved before kubectl sees them.
-  substitute | hack/run-tool.sh ko delete --ignore-not-found -f -
+  local name
+  for name in "${TEMPLATES[@]}"; do
+    kubectl_ate delete actor-template "${name}" -a "${ATESPACE}" 2>/dev/null \
+      || true # may not exist
+  done
+  kubectl_ate delete atespace "${ATESPACE}" 2>/dev/null \
+    || true # may not exist or is not empty
+  # The pool manifest contains ko:// image references; route through
+  # `ko delete` so they get resolved before kubectl sees them.
+  substitute "${MANIFEST_TEMPLATE}" | hack/run-tool.sh ko delete --ignore-not-found -f -
 }
 
 if [[ "$#" -eq 0 ]]; then
