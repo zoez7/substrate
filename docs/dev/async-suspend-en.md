@@ -14,7 +14,7 @@ Describes how atelet decides when to promote a snapshot to durable, local + dura
 | 11 | Suspend → S2 | `pendingSince`=11, upload due 16, detach due 41 |
 | 11–15.5 | Repeated resume/suspend → S3 … S8 | Each new snapshot prunes the previous one. `pendingSince` stays at 11. Each suspend resets detach |
 | 16 | Upload timer fires | Upload S8. S2–S7 are never uploaded |
-| 45.5 | Detach timer fires (suspended since 15.5) | S8 is already durable → `ReportActorSnapshotState` (latest local empty) is acked → delete local S8 |
+| 45.5 | Detach timer fires (suspended since 15.5) | S8 is already durable → `ReportActorSnapshotState` (`local_snapshots` empty) is acked → delete local S8 |
 
 ### Full timeline
 
@@ -22,7 +22,7 @@ Only **what is uploaded, and when** (`uploadDelay` = 5m):
 
 ![Async suspend timeline](../assets/async-suspend-timeline.png)
 
-- Gen_1: on suspend, it is saved locally only. After 5 min it is uploaded. By then the actor has already resumed and is running, but the upload still goes ahead, and becomes `Gen_1 [Local, Durable]`.
+- Gen_1: on suspend, it is saved locally only. After 5 min it is uploaded. By then the actor has already resumed and is running, but the upload still goes ahead, and becomes `Gen_1 [Local, Durable]`, that is `LOCAL_AND_DURABLE`.
 - A later suspend produces Gen_2 and starts a new 5 min timer.
 - Quick resume/suspend cycles during that timer produce Gen_3 and Gen_4, and do not push back the timer (`pendingSince` stays at the time since Gen_2 existed).
 - When the 5 min are up, only the **latest** snapshot at that moment, Gen_4, is uploaded. Gen_2 and Gen_3 have already been pruned and are never uploaded.
@@ -37,13 +37,13 @@ Only **what is uploaded, and when** (`uploadDelay` = 5m):
   - `DetachActor` returns `FailedPrecondition` for a running actor.
   - The local snapshot a running actor keeps after resuming from local is only freed when the actor next suspends and the new snapshot prunes it.
 - A `Checkpoint` with `UPLOAD_MODE_IMMEDIATE` (golden actor) does not go through async upload.
-  - It finishes the upload before returning and keeps no local snapshot, same as today's `CHECKPOINT_TYPE_EXTERNAL`.
+  - It finishes the upload before returning and keeps no local snapshot, so it is `DURABLE_ONLY` from the start.
 - Reporting uploads to ate-api-server is retried in the background, without blocking the next upload.
-  - Whether or not the report succeeds, every `CheckpointResponse` carries both the latest local and the latest durable snapshot, and `DetachActorResponse` carries the latest durable snapshot.
+  - Whether or not the report succeeds, every `CheckpointResponse` carries both all local snapshots and the latest durable snapshot, and `DetachActorResponse` carries the latest durable snapshot.
 
 ### Async upload flow
 
-Uploads are driven by atelet's own timer. ate-api-server only provides `durable_snapshot_uri` on `Checkpoint`, and after that passively receives reports.
+Uploads are driven by atelet's own timer. ate-api-server only provides `snapshot.object` on `Checkpoint`, and after that passively receives reports.
 
 ```mermaid
 sequenceDiagram
@@ -52,16 +52,16 @@ sequenceDiagram
     participant T as atelet upload timer
     participant O as object storage
 
-    A->>L: Checkpoint S1, generation 1, durable_snapshot_uri, UPLOAD_MODE_DEFERRED
+    A->>L: Checkpoint S1, generation 1, snapshot.object, UPLOAD_MODE_DEFERRED
     L->>L: write S1 locally, pendingSince = now, persist state
     L->>T: arm at pendingSince + 5m
-    L-->>A: CheckpointResponse, latest local S1, latest durable, upload_due_time
+    L-->>A: CheckpointResponse, local snapshots S1, latest durable, upload_due_time
 
     T->>L: pendingSince + 5m reached
     L->>L: Uploading = S1, pendingSince = 0, persist
     L->>O: upload S1 files, then manifest as commit marker
     L->>L: LatestDurable = S1, Uploading cleared, StateVersion++, persist
-    L->>A: WorkerService.ReportActorSnapshotState, latest durable S1, latest local S1
+    L->>A: WorkerService.ReportActorSnapshotState, latest durable S1, local snapshots S1
     A->>A: mark S1 durable_snapshot COMPLETED, release replaced durable snapshot
     A-->>L: ok
     L->>L: ReportedVersion = StateVersion, persist
@@ -86,13 +86,13 @@ Failure handling:
 
 ### State notification: `WorkerService.ReportActorSnapshotState`
 
-atelet uses **one** RPC to report to ate-api-server the snapshot state of an actor on its node: which snapshot is the latest durable one, and which local snapshot is the latest one usable for restore. Upload completion and detach are both just changes to this state.
+atelet uses **one** RPC to report to ate-api-server the snapshot state of an actor on its node: which snapshot is the latest durable one, and every local snapshot atelet still holds (the same as `CheckpointResponse.local_snapshots`). Upload completion and detach are both just changes to this state.
 
-- **One RPC for both upload and detach**: there is no separate upload-complete or detach RPC. An upload success changes `latest_durable`; a detach sets `latest_local` to empty. Both go through this same call.
-- **It reports state, not events**: each call sends the current full `{latest_durable, latest_local}`. ate-api-server only needs to reconcile against the latest one, and lost or out-of-order older reports do not need to be resent.
+- **One RPC for both upload and detach**: there is no separate upload-complete or detach RPC. An upload success changes `latest_durable`; a detach makes `local_snapshots` empty. Both go through this same call.
+- **It reports state, not events**: each call sends the current full `{latest_durable, local_snapshots}`. ate-api-server only needs to reconcile against the latest one, and lost or out-of-order older reports do not need to be resent.
 - **When it is sent**:
-  - After an upload succeeds (the manifest is written): `latest_durable` has changed.
-  - On detach, after the latest snapshot is durable and before the local copy is deleted: `latest_local` becomes empty.
+  - After an upload succeeds (the manifest is written): `latest_durable` has changed, and `local_snapshots` may have changed too (an uploaded older snapshot gets pruned).
+  - On detach, after the latest snapshot is durable and before the local copy is deleted: `local_snapshots` becomes empty.
   - After an atelet restart, if there is state that has not been acked yet.
 - **Not needed on Checkpoint**: `CheckpointResponse` already carries the same two fields.
 
@@ -101,13 +101,15 @@ atelet uses **one** RPC to report to ate-api-server the snapshot state of an act
 ```proto
 service WorkerService {
   // ReportActorSnapshotState reports an Actor's snapshot state on the
-  // caller's node: the newest snapshot atelet has uploaded, and the local
-  // snapshot it will restore from, if any. Each report carries the whole
-  // state, so a newer report supersedes any older one still in flight.
+  // caller's node: the newest snapshot atelet has uploaded, and every local
+  // snapshot it still holds. Each report carries the whole state, so a newer
+  // report supersedes any older one still in flight.
   //
   // The control plane marks latest_durable COMPLETED if it is newer than
-  // what it has recorded. An unset latest_local means atelet no longer
-  // serves local restores for the Actor (it is detaching or has detached):
+  // what it has recorded, and may drop its entries for local-only
+  // generations not in local_snapshots. An empty local_snapshots means atelet
+  // no longer serves local restores for the Actor (it is detaching or has
+  // detached):
   // the control plane clears Snapshot.locality for the caller's node and, if
   // the Actor is SUSPENDED there, status.assigned_node, so the next resume
   // may go to any node. atelet waits for this report to succeed before
@@ -135,17 +137,25 @@ message ReportActorSnapshotStateRequest {
   // uploaded none since the Actor arrived on this node.
   //
   // +k8s:optional
-  DurableSnapshotInfo latest_durable = 3;
+  DurableSnapshot latest_durable = 3;
 
-  // The local snapshot atelet will restore the Actor from. Unset once atelet
-  // has started detaching the Actor, even while the files are still on disk:
-  // from then on it refuses local restores.
+  // Every local snapshot of the Actor atelet still holds: the latest one,
+  // plus the one an in-flight upload is reading, if any. The highest
+  // generation is the Actor's latest local snapshot, the one atelet restores
+  // from. Empty once atelet has started detaching the Actor, even while the
+  // files are still on disk: from then on it refuses local restores.
   //
   // +k8s:optional
-  LocalSnapshotInfo latest_local = 4;
+  // +k8s:maxItems=2
+  // +k8s:listType=map
+  // +k8s:listMapKey=generation
+  repeated LocalSnapshot local_snapshots = 4;
 }
 
-message DurableSnapshotInfo {
+// DurableSnapshot is a snapshot atelet has uploaded to object storage. It
+// mirrors atelet's DurableSnapshot, as returned on CheckpointResponse, and
+// atelet converts its own copy field by field when reporting.
+message DurableSnapshot {
   // Snapshot.uuid and Snapshot.generation as sent on the CheckpointRequest
   // that produced it.
   //
@@ -157,21 +167,33 @@ message DurableSnapshotInfo {
   // +k8s:minimum=1
   int32 generation = 2;
 
-  // Where it was uploaded. Must equal the durable_snapshot_uri the control
-  // plane sent on that CheckpointRequest: atelet cannot point a Snapshot at
-  // objects of its choosing.
+  // Where it was uploaded. Must equal the snapshot.object.snapshot_uri the
+  // control plane sent on that CheckpointRequest: atelet cannot point a
+  // Snapshot at objects of its choosing. The control plane's existing
+  // ObjectSnapshot, which mirrors atelet's ObjectStorage.
   //
   // +k8s:required
-  // +k8s:maxLength=2048
-  string snapshot_uri = 3;
+  ObjectSnapshot object = 3;
 
-  // When the manifest was written. Informational, for upload-lag metrics.
+  // Read from the snapshot's own manifest.
+  //
+  // +k8s:required
+  // +k8s:minimum=1
+  // +k8s:maximum=3 # keep this in sync with the SnapshotFidelity enum
+  SnapshotFidelity fidelity = 4;
+
+  // When the manifest, the upload's commit marker, was written.
   //
   // +k8s:optional
-  google.protobuf.Timestamp upload_complete_time = 4;
+  google.protobuf.Timestamp upload_complete_time = 5;
 }
 
-message LocalSnapshotInfo {
+// LocalSnapshot is a snapshot held on the caller's node. It mirrors atelet's
+// LocalSnapshot, as returned on CheckpointResponse.
+message LocalSnapshot {
+  // Snapshot.uuid and Snapshot.generation as sent on the CheckpointRequest
+  // that produced it.
+  //
   // +k8s:required
   // +k8s:format=k8s-short-name
   string snapshot_uuid = 1;
@@ -179,6 +201,16 @@ message LocalSnapshotInfo {
   // +k8s:required
   // +k8s:minimum=1
   int32 generation = 2;
+
+  // +k8s:required
+  // +k8s:minimum=1
+  // +k8s:maximum=3 # keep this in sync with the SnapshotFidelity enum
+  SnapshotFidelity fidelity = 3;
+
+  // When the checkpoint that produced it completed.
+  //
+  // +k8s:optional
+  google.protobuf.Timestamp capture_time = 4;
 }
 
 message ReportActorSnapshotStateResponse {}
@@ -192,12 +224,13 @@ message ReportActorSnapshotStateResponse {}
 2. Validate `latest_durable` (if set):
    - `generation` ≤ the latest COMPLETED durable generation → this part is a no-op (duplicate or stale).
    - That generation is not found, or `uuid` does not match → `FailedPrecondition`.
-   - `snapshot_uri` differs from the expected URI (the result of `newInProgressSnapshotURI` for that uuid) → `InvalidArgument`.
-3. Validate the case where `latest_local` is empty (detach):
+   - `object.snapshot_uri` differs from the expected URI (the result of `newInProgressSnapshotURI` for that uuid) → `InvalidArgument`.
+3. Validate the case where `local_snapshots` is empty (detach):
    - After applying step 2, the `durable_snapshot` of the latest generation on this node must be COMPLETED. Otherwise → `FailedPrecondition`: atelet wants to drop the only copy of the latest state, so it is rejected.
 4. A single `UpdateActor` (optimistic precondition, without taking the actor lease, so it does not queue behind long workflows):
    - When `latest_durable` is updated: set that entry's `durable_snapshot = {COMPLETED, uri}`, and prune older durable entries.
-   - When `latest_local` is empty: clear `Snapshot.locality` for this node on generations ≤ `latest_durable.generation`. If the actor is SUSPENDED on this node, also clear `assigned_node`. If it is RESUMING, only clear locality, since `assigned_node` is owned by the resume workflow. (atelet does not detach running actors.)
+   - Local-only generations on this node that are not in `local_snapshots`: atelet will never upload them, so their entries can be deleted.
+   - When `local_snapshots` is empty: clear `Snapshot.locality` for this node on generations ≤ `latest_durable.generation`. If the actor is SUSPENDED on this node, also clear `assigned_node`. If it is RESUMING, only clear locality, since `assigned_node` is owned by the resume workflow. (atelet does not detach running actors.)
    - Version conflict → `Aborted`, and atelet retries.
 5. After commit, release the replaced durable snapshot objects best-effort (same as today's `releaseReplacedSnapshot`).
 
@@ -220,7 +253,7 @@ If `ReportActorSnapshotState` keeps failing (ate-api-server unreachable, persist
 - **Every `CheckpointResponse` must carry both the actor's local snapshots and the latest durable snapshot atelet has uploaded** (`local_snapshots`, `latest_durable_snapshot`), with exactly the same content as `ReportActorSnapshotState`. The highest generation in `local_snapshots` is the latest local snapshot.
   - They must be included whether or not the report has succeeded or is still retrying, and must not be omitted because "it was already reported".
   - `latest_durable_snapshot` is empty only if atelet has never uploaded a snapshot of that actor.
-- **ate-api-server reconciles `CheckpointResponse` the same way as a report**: if `latest_durable` is newer than what is recorded, mark it COMPLETED. This way, even if the report never arrives, the next suspend fills in the durable state.
+- **ate-api-server reconciles `CheckpointResponse` the same way as a report**: if `latest_durable` is newer than what is recorded, mark it COMPLETED; local-only generations not in `local_snapshots` can be deleted. This way, even if the report never arrives, the next suspend fills in the durable state.
 - **Limits of the fallback**:
   - While an actor stays suspended and does not checkpoint again, there is no `CheckpointResponse` to fall back on, and only report retries help. During that time the durable state seen by the control plane lags behind. If the node fails then, ate-api-server optimistically restores the latest generation on a new node: if it was uploaded the restore succeeds, and if not the actor is marked CRASHED, never silently rolled back (see "Resume cannot happen on `assigned_node`").
   - Detach: it waits for the report's ack before deleting the local copy. If retries still fail after `detachReportTimeout`, it deletes the copy without the ack (see "Detach flow"), and resume can still recover from that.
@@ -243,14 +276,14 @@ sequenceDiagram
         L->>O: upload files, then manifest as commit marker
         L->>L: LatestDurable = latest, persist
     end
-    L->>A: WorkerService.ReportActorSnapshotState, latest durable = latest, latest local unset
+    L->>A: WorkerService.ReportActorSnapshotState, latest durable = latest, local snapshots empty
     A->>A: one UpdateActor, durable COMPLETED, clear locality, clear assigned_node if SUSPENDED on this node
     A-->>L: ok
     L->>L: DetachPhase = detached, persist
     L->>L: delete local snapshots, remove state file and actor dir
 ```
 
-- **Before deleting the local copy, atelet first gets an ack for `ReportActorSnapshotState` (with latest local empty). In the worst case it does not wait for the ack.**
+- **Before deleting the local copy, atelet first gets an ack for `ReportActorSnapshotState` (with `local_snapshots` empty). In the worst case it does not wait for the ack.**
   - This is detach's only dependency on ate-api-server: it is a bookkeeping confirmation, not an approval.
   - Why wait for the ack first: once the control plane receives the report, it immediately clears `assigned_node`, so later resumes go straight to any node from the durable snapshot, without going through a recovery path.
   - After the ack, the local files may stay on disk for a while, but the control plane no longer depends on them and will not send local `Restore`s to this node anymore.
@@ -267,7 +300,7 @@ sequenceDiagram
 
 ### Detach racing with resume
 
-Until ate-api-server receives a `ReportActorSnapshotState` with latest local empty, `assigned_node` still points to this node, so it keeps scheduling resumes here. Meanwhile atelet has already started detaching, and the local snapshot may be deleted at any moment.
+Until ate-api-server receives a `ReportActorSnapshotState` with `local_snapshots` empty, `assigned_node` still points to this node, so it keeps scheduling resumes here. Meanwhile atelet has already started detaching, and the local snapshot may be deleted at any moment.
 
 **Rule**: when atelet receives a `Restore` and the actor's `DetachPhase` is not empty (`detaching` or `detached`), it rejects it outright, and does **not** cancel the detach.
 
@@ -297,7 +330,7 @@ sequenceDiagram
     A->>A: unwind resume, release worker, back to SUSPENDED
     A-->>C: FAILED_PRECONDITION
     L->>O: upload S8 files, then manifest
-    L->>A: ReportActorSnapshotState, latest durable S8, latest local unset
+    L->>A: ReportActorSnapshotState, latest durable S8, local snapshots empty
     A->>A: mark S8 COMPLETED, clear assigned_node and locality
     A-->>L: ok
     L->>L: DetachPhase = detached, delete local S8
@@ -319,7 +352,7 @@ ate-api-server knows `assigned_node`, and can connect to atelet by node (`DialFo
    - When it returns, the latest generation is guaranteed durable. ate-api-server marks it COMPLETED, clears `assigned_node` and locality, then restores from the durable snapshot on any node.
 2. **Cannot reach it** (the connection keeps timing out, and atecontroller workersync has deleted the node's Worker) → treat the node as lost:
    - Latest generation already COMPLETED → restore from the durable snapshot on another node.
-   - Latest generation not COMPLETED → **optimistically** restore its `durable_snapshot_uri` on a new node.
+   - Latest generation not COMPLETED → **optimistically** restore it from `snapshot.object` on a new node.
      - Success: the upload actually finished, only the report did not arrive (e.g. the report retries timed out and the local copy was deleted without an ack). Mark it COMPLETED, and the resume is done.
      - Failure with reason `DURABLE_SNAPSHOT_NOT_FOUND`: the latest state was lost with the node. **Mark the actor CRASHED**, and do not automatically fall back to an older durable snapshot. The crash message names the lost generation and node, and the generation a revert would restore to. The user can call `RevertActor` to go back to the last COMPLETED durable snapshot.
 
@@ -333,201 +366,210 @@ ate-api-server knows `assigned_node`, and can connect to atelet by node (`DialFo
 
 ## atelet proto changes
 
-All in `internal/proto/ateletpb/atelet.proto`. Per `AGENTS.md`, removed fields and RPCs are deleted outright, without `reserved`. The sections below are diffs against today. Comment-only changes to existing RPCs, messages, and fields are omitted.
+All in `internal/proto/ateletpb/atelet.proto`. Per `AGENTS.md`, removed fields and RPCs are deleted outright, without `reserved`. The sections below show the resulting definitions. Unchanged RPCs, messages, and fields are left out or marked as such.
 
 ### Removed
 
 - `AteomHerder.UploadPausedCheckpoint`, `UploadPausedCheckpointRequest`, `UploadPausedCheckpointResponse`.
   - Replaced by the timed upload and `DetachActor`.
-- `CheckpointType`, `LocalCheckpointConfiguration`, `ExternalCheckpointConfiguration`.
-  - A checkpoint always lands locally first, and `upload_mode` decides when it becomes durable.
+- `CheckpointType`, `LocalCheckpointConfiguration`, `ExternalCheckpointConfiguration`, `ExternalRestoreConfiguration`.
+  - A checkpoint always lands locally first, and `upload_mode` decides when it becomes durable. `Snapshot` and `ObjectStorage` below carry what these held.
+
+### Shared messages defined in #2545
+
+The three new shared messages, `Snapshot`, `ObjectStorage` and `SnapshotStoreOption`, have the same shape as the ones proposed in #2545.
+
+```proto
+message ObjectStorage {
+  // The object storage URI of the snapshot. Object names are appended to it,
+  // so it addresses the snapshot as a whole rather than any one object.
+  string snapshot_uri = 1;
+}
+
+// Snapshot identifies one snapshot of an actor. Shared by Checkpoint,
+// DetachActor and Restore.
+message Snapshot {
+  // ateapi Snapshot.uuid. Names the snapshot's directory under the actor's
+  // local-checkpoint directory, so this is a bare name and must not contain
+  // a path separator.
+  string snapshot_uuid = 1;
+
+  // On Checkpoint: the fidelity to capture.
+  // On DetachActor: the fidelity the uploaded snapshot must have.
+  // On Restore: the fidelity to restore the actor with.
+  SnapshotFidelity fidelity = 2;
+
+  // The snapshot's durable copy in object storage.
+  ObjectStorage object = 3;
+
+  // ateapi Snapshot.generation. Orders the actor's snapshots: a request at
+  // atelet's newest generation with the same snapshot_uuid is a retry, and
+  // one below it is stale and refused.
+  int32 generation = 4;
+}
+
+// SnapshotStoreOption is where a snapshot's copies live. Every snapshot
+// starts LOCAL_ONLY, the upload timer takes it to LOCAL_AND_DURABLE, and
+// detach takes it to DURABLE_ONLY.
+enum SnapshotStoreOption {
+  SNAPSHOT_STORE_OPTION_UNSPECIFIED = 0;
+
+  // Only on node-local disk (`local-checkpoint/<snapshot_uuid>`).
+  SNAPSHOT_STORE_OPTION_LOCAL_ONLY = 1;
+
+  // Only in durable storage (`snapshot.object`, at `snapshot.fidelity`).
+  SNAPSHOT_STORE_OPTION_DURABLE_ONLY = 2;
+
+  // Both on node-local disk and in durable storage.
+  SNAPSHOT_STORE_OPTION_LOCAL_AND_DURABLE = 3;
+}
+```
 
 ### `AteomHerder`
 
-```diff
- service AteomHerder {
-   rpc Run(RunRequest) returns (RunResponse) {}
-   rpc Checkpoint(CheckpointRequest) returns (CheckpointResponse) {}
-   rpc Restore(RestoreRequest) returns (RestoreResponse) {}
--  rpc UploadPausedCheckpoint(UploadPausedCheckpointRequest) returns (UploadPausedCheckpointResponse) {}
-+
-+  // DetachActor runs the detach atelet otherwise starts on its own (detach
-+  // timer, disk pressure): make the actor's latest local snapshot durable and
-+  // reported, then delete every local snapshot. ate-api-server calls it when
-+  // a resume cannot be scheduled on the actor's assigned node, so the actor
-+  // can move to another node. Only a suspended actor is detached: for an
-+  // actor running on this node it fails with FAILED_PRECONDITION.
-+  // Idempotent: once the local state is gone,
-+  // atelet answers from the uploaded manifest at durable_snapshot_uri.
-+  rpc DetachActor(DetachActorRequest) returns (DetachActorResponse) {}
-+
-   rpc Terminate(TerminateRequest) returns (TerminateResponse) {}
- }
+```proto
+service AteomHerder {
+  rpc Run(RunRequest) returns (RunResponse) {}
+  rpc Checkpoint(CheckpointRequest) returns (CheckpointResponse) {}
+  rpc Restore(RestoreRequest) returns (RestoreResponse) {}
 
--message UploadPausedCheckpointRequest { ... }
--message UploadPausedCheckpointResponse {}
+  // DetachActor runs the detach atelet otherwise starts on its own (detach
+  // timer, disk pressure): make the actor's latest local snapshot durable and
+  // reported, then delete every local snapshot. ate-api-server calls it when
+  // a resume cannot be scheduled on the actor's assigned node, so the actor
+  // can move to another node. Only a suspended actor is detached: for an
+  // actor running on this node it fails with FAILED_PRECONDITION.
+  //
+  // Idempotent: when `snapshot.object` already holds the snapshot at
+  // `snapshot.fidelity`, nothing is uploaded and only the report and the
+  // local deletion run, so a retry is safe. A snapshot generation keeps one
+  // fidelity, so a local checkpoint or an uploaded snapshot at another
+  // fidelity fails the call with FAILED_PRECONDITION. Once the local state
+  // is gone, atelet answers from the uploaded manifest at `snapshot.object`.
+  rpc DetachActor(DetachActorRequest) returns (DetachActorResponse) {}
+
+  rpc Terminate(TerminateRequest) returns (TerminateResponse) {}
+}
 ```
 
 ### `Checkpoint`
 
-```diff
--enum CheckpointType {
--  CHECKPOINT_TYPE_UNSPECIFIED = 0;
--  CHECKPOINT_TYPE_LOCAL = 1;
--  CHECKPOINT_TYPE_EXTERNAL = 2;
--}
--
--message LocalCheckpointConfiguration {
--  string snapshot_name = 1;
--}
--
--message ExternalCheckpointConfiguration {
--  string snapshot_uri = 1;
--}
-+// UploadMode is when a checkpoint's snapshot becomes durable.
-+enum UploadMode {
-+  UPLOAD_MODE_UNSPECIFIED = 0;
-+  // Keep the snapshot locally and upload it on atelet's schedule. Used by
-+  // SuspendActor.
-+  UPLOAD_MODE_DEFERRED = 1;
-+  // Upload before Checkpoint returns, and keep no local snapshot. Used for
-+  // golden actors, whose snapshot must be durable before any actor can
-+  // borrow it.
-+  UPLOAD_MODE_IMMEDIATE = 2;
-+}
+```proto
+// UploadMode is when a checkpoint's snapshot becomes durable.
+enum UploadMode {
+  UPLOAD_MODE_UNSPECIFIED = 0;
+  // Keep the snapshot locally and upload it on atelet's schedule. Used by
+  // SuspendActor.
+  UPLOAD_MODE_DEFERRED = 1;
+  // Upload before Checkpoint returns, and keep no local snapshot. Used for
+  // golden actors, whose snapshot must be durable before any actor can
+  // borrow it.
+  UPLOAD_MODE_IMMEDIATE = 2;
+}
 
- message CheckpointRequest {
-   // ... fields 1-7 unchanged ...
+message CheckpointRequest {
+  // ... fields 1-7 unchanged ...
 
--  CheckpointType type = 8;
--
--  oneof config {
--    LocalCheckpointConfiguration local_config = 9;
--    ExternalCheckpointConfiguration external_config = 10;
--  }
-+  // The snapshot this checkpoint produces (ateapi Snapshot.uuid). Names its
-+  // local directory and identifies it in atelet's reports. A bare name: it
-+  // must not contain a path separator.
-+  string snapshot_name = 8;
-+
-+  // ateapi Snapshot.generation. Orders the actor's snapshots: a request at
-+  // atelet's newest generation with the same snapshot_name is a retry, and
-+  // one below it is stale and refused.
-+  int32 generation = 9;
-+
-+  // Where this snapshot is written in object storage, if it is uploaded.
-+  // Fixed at checkpoint time so atelet can upload later without asking the
-+  // control plane.
-+  string durable_snapshot_uri = 10;
+  // The snapshot this checkpoint produces. `snapshot.object` is always
+  // required: it is fixed at checkpoint time so atelet can upload later
+  // without asking the control plane.
+  Snapshot snapshot = 8;
 
-   SnapshotFidelity fidelity = 11;
-+
-+  UploadMode upload_mode = 12;
- }
+  UploadMode upload_mode = 9;
+}
 
-+// Every CheckpointResponse reports the actor's local snapshots and the latest
-+// snapshot atelet has uploaded, so the control plane can reconcile its
-+// Snapshot list from any response even if a ReportActorSnapshotState was
-+// lost. The two fields carry the same state as that report.
- message CheckpointResponse {
-+  // Every local snapshot of the actor atelet still holds after this
-+  // checkpoint: the one just taken, plus the one an in-flight upload is
-+  // reading, if any. The highest generation is the actor's latest local
-+  // snapshot. The control plane can drop its entries for any other
-+  // local-only generation, because atelet will never upload them. Empty
-+  // with UPLOAD_MODE_IMMEDIATE, which keeps no local snapshot.
-+  repeated LocalSnapshot local_snapshots = 1;
-+
-+  // The newest snapshot of this actor that atelet has uploaded, whether or
-+  // not ReportActorSnapshotState has reached the control plane yet. With
-+  // UPLOAD_MODE_IMMEDIATE this is the snapshot just taken. Unset only if
-+  // atelet has never uploaded a snapshot of this actor since it arrived on
-+  // this node.
-+  DurableSnapshot latest_durable_snapshot = 2;
-+
-+  // When atelet plans to upload the latest local snapshot. Unset when that
-+  // snapshot is already durable (UPLOAD_MODE_IMMEDIATE).
-+  google.protobuf.Timestamp upload_due_time = 3;
- }
+// Every CheckpointResponse reports the actor's local snapshots and the latest
+// snapshot atelet has uploaded, so the control plane can reconcile its
+// Snapshot list from any response even if a ReportActorSnapshotState was
+// lost. The two fields carry the same state as that report.
+message CheckpointResponse {
+  // Every local snapshot of the actor atelet still holds after this
+  // checkpoint: the one just taken, plus the one an in-flight upload is
+  // reading, if any. The highest generation is the actor's latest local
+  // snapshot. The control plane can drop its entries for any other
+  // local-only generation, because atelet will never upload them. Empty
+  // with UPLOAD_MODE_IMMEDIATE, which keeps no local snapshot.
+  repeated LocalSnapshot local_snapshots = 1;
 
-+// LocalSnapshot is a snapshot held on this node's disk.
-+message LocalSnapshot {
-+  string snapshot_name = 1;
-+  int32 generation = 2;
-+  SnapshotFidelity fidelity = 3;
-+  // When the checkpoint that produced it completed.
-+  google.protobuf.Timestamp capture_time = 4;
-+}
-+
-+// DurableSnapshot is a snapshot atelet has uploaded to object storage.
-+message DurableSnapshot {
-+  string snapshot_name = 1;
-+  int32 generation = 2;
-+  string snapshot_uri = 3;
-+  // Read from the snapshot's own manifest.
-+  SnapshotFidelity fidelity = 4;
-+  // When the manifest, the upload's commit marker, was written.
-+  google.protobuf.Timestamp upload_complete_time = 5;
-+}
+  // The newest snapshot of this actor that atelet has uploaded, whether or
+  // not ReportActorSnapshotState has reached the control plane yet. With
+  // UPLOAD_MODE_IMMEDIATE this is the snapshot just taken. Unset only if
+  // atelet has never uploaded a snapshot of this actor since it arrived on
+  // this node.
+  DurableSnapshot latest_durable_snapshot = 2;
+
+  // When atelet plans to upload the latest local snapshot. Unset when that
+  // snapshot is already durable (UPLOAD_MODE_IMMEDIATE).
+  google.protobuf.Timestamp upload_due_time = 3;
+}
+
+// LocalSnapshot is a snapshot held on this node's disk.
+message LocalSnapshot {
+  string snapshot_uuid = 1;
+  int32 generation = 2;
+  SnapshotFidelity fidelity = 3;
+  // When the checkpoint that produced it completed.
+  google.protobuf.Timestamp capture_time = 4;
+}
+
+// DurableSnapshot is a snapshot atelet has uploaded to object storage.
+message DurableSnapshot {
+  string snapshot_uuid = 1;
+  int32 generation = 2;
+  ObjectStorage object = 3;
+  // Read from the snapshot's own manifest.
+  SnapshotFidelity fidelity = 4;
+  // When the manifest, the upload's commit marker, was written.
+  google.protobuf.Timestamp upload_complete_time = 5;
+}
 ```
 
 ### `DetachActor`
 
-```diff
-+message DetachActorRequest {
-+  string atespace = 1;
-+  string actor_name = 2;
-+  string actor_uid = 3;
-+
-+  // For metrics attribution, like on CheckpointRequest.
-+  string actor_template_atespace = 4;
-+  string actor_template_name = 5;
-+
-+  // The actor's latest snapshot as the control plane records it. atelet
-+  // refuses with FailedPrecondition if it holds a newer generation, because
-+  // the caller's view is stale.
-+  string snapshot_name = 6;
-+  int32 generation = 7;
-+
-+  // Where that snapshot is, or will be, uploaded. atelet uses it to answer a
-+  // retried detach whose local state is already gone, by probing for the
-+  // uploaded manifest.
-+  string durable_snapshot_uri = 8;
-+}
-+
-+message DetachActorResponse {
-+  // The snapshot that is now durable: the actor's latest.
-+  DurableSnapshot durable_snapshot = 1;
-+}
+```proto
+message DetachActorRequest {
+  string atespace = 1;
+  string actor_name = 2;
+  string actor_uid = 3;
+
+  // For metrics attribution, like on CheckpointRequest.
+  string actor_template_atespace = 4;
+  string actor_template_name = 5;
+
+  // The actor's latest snapshot as the control plane records it. atelet
+  // refuses with FAILED_PRECONDITION if it holds a newer generation, because
+  // the caller's view is stale. `snapshot.object` is where that snapshot is,
+  // or will be, uploaded: atelet uses it to answer a retried detach whose
+  // local state is already gone, by probing for the uploaded manifest.
+  Snapshot snapshot = 6;
+}
+
+message DetachActorResponse {
+  // The snapshot that is now durable: the actor's latest.
+  DurableSnapshot durable_snapshot = 1;
+}
 ```
 
 ### `Restore`
 
-With `CheckpointType` removed, the restore source is told apart directly by a `oneof`. A local restore carries no durable fallback: once detach has started, atelet refuses the restore, and does not switch to durable on the control plane's behalf.
+A local restore carries no durable fallback: once detach has started, atelet refuses the restore, and does not switch to durable on the control plane's behalf. The control plane picks the source.
 
-```diff
-+message LocalRestoreConfiguration {
-+  // The local snapshot to restore (ateapi Snapshot.uuid).
-+  string snapshot_name = 1;
-+}
+```proto
+message RestoreRequest {
+  // ... fields 1-7 unchanged ...
 
- message RestoreRequest {
-   // ... fields 1-7 unchanged ...
+  // Snapshot to restore from. `snapshot.object` is required only when
+  // `source` is DURABLE_ONLY.
+  Snapshot snapshot = 8;
 
--  CheckpointType type = 8;
--
--  oneof config {
--    LocalCheckpointConfiguration local_config = 9;
--    ExternalRestoreConfiguration external_config = 10;
--  }
-+  oneof source {
-+    LocalRestoreConfiguration local = 8;
-+    ExternalRestoreConfiguration external = 9;
-+  }
+  // Which copy to read. LOCAL_ONLY reads `local-checkpoint/<snapshot_uuid>`
+  // and fails with LOCAL_SNAPSHOT_UNAVAILABLE if it is missing, unusable, or
+  // the actor is detaching. DURABLE_ONLY reads `snapshot.object`. No other
+  // value is accepted, and atelet never falls back from one to the other.
+  SnapshotStoreOption source = 9;
 
-   // ... fidelity, egress_gateway, cpu_milli, memory_bytes, sandbox_assets
-   // unchanged ...
- }
+  // ... egress_gateway, cpu_milli, memory_bytes, sandbox_assets unchanged ...
+}
 ```
 
 ## atelet per-actor local state
@@ -543,7 +585,7 @@ With `CheckpointType` removed, the restore source is told apart directly by a `o
 - **Path**: `ateletpath.ActorSnapshotStateFile(actorUID)`, i.e. `<ActorPath>/snapshot-state.json`.
   - Like `sandbox-assets.json`, it sits directly under `ActorPath`, so `resetActorDirs` at the end of `Checkpoint` does not clear it.
 - **Writes**: every change rewrites it with `writeFileAtomic` under the actor lock.
-- **When it is deleted**: after the detach `ReportActorSnapshotState` (with latest local empty) is acked and the local files are deleted, or on `Terminate`.
+- **When it is deleted**: after the detach `ReportActorSnapshotState` (with `local_snapshots` empty) is acked and the local files are deleted, or on `Terminate`.
 
 ```go
 // actorSnapshotState is atelet's record of one actor's snapshots on this node
@@ -582,7 +624,8 @@ type actorSnapshotState struct {
     DetachPhase detachPhase `json:"detachPhase,omitempty"`
 
     // StateVersion is bumped on every change ate-api-server is told about
-    // (LatestDurable, or latest local becoming unset on detach).
+    // (LatestDurable, LocalSnapshots, or local snapshots becoming empty on
+    // detach).
     // ReportedVersion is the StateVersion of the last
     // ReportActorSnapshotState that succeeded. A report is owed while
     // ReportedVersion < StateVersion; each attempt sends the current state.
@@ -596,7 +639,7 @@ const (
     // detachNone: no detach in progress.
     detachNone detachPhase = ""
     // detachDetaching: making the latest snapshot durable, then reporting
-    // the state with latest local unset.
+    // the state with empty local snapshots.
     detachDetaching detachPhase = "detaching"
     // detachDetached: the local files may be deleted, either because that
     // report was acked or because retries outlasted detachReportTimeout once
@@ -679,41 +722,135 @@ type actorSnapshots struct {
 - **Getting an entry**: hold `snapshotManager.mu` to look up or create the entry, release it, then take `actorSnapshots.mu`. If `removed` is already set, release and retry.
 - **Order for removing an entry**: take `actorSnapshots.mu` → set `removed = true` → take `snapshotManager.mu` and delete it from the map and from summaries.
 
-### Timer scheduler: one goroutine + min-heap
+### Background scheduling: client-go workqueue + per-actor reconcile
 
-**Decision**: the upload and detach timers of all actors are driven by one node-wide scheduler goroutine, with a min-heap of `(dueTime, uid, kind)`, instead of a `time.Timer` per actor.
+Upload, report, and detach for all actors are driven by one node-wide client-go workqueue, keyed by actor UID. atelet's `sandbox_prewarm.go` already uses the same pattern.
+
+Each actor has a `reconcile(uid)`. Like a Kubernetes controller, it is level-triggered: it does not care which event triggered it, it only looks at the current state, does the next step, and returns the next deadline.
+
+#### Architecture diagram
+
+```
+  Checkpoint / upload done / report done / atelet restart / disk pressure / DetachActor
+                     │
+                     │ queue.Add(uid)             look now
+                     │ queue.AddAfter(uid, d)     look again after d
+                     ▼
+        ┌─────────────────────────────────────┐
+        │ workqueue (client-go)               │
+        │                                     │
+        │  delaying heap     uid-a  @ t5      │
+        │                    uid-b  @ t16     │
+        │                                     │
+        │  ready queue       deduped by uid   │
+        │  rate limiter      per-uid backoff  │
+        └──────────────────┬──────────────────┘
+                           │ Get()
+                           │ one uid is never handed to two workers at once
+                           ▼
+        ┌─────────────────────────────────────┐
+        │ N workers  (N = upload concurrency) │
+        │                                     │
+        │  reconcile(uid):                    │
+        │    lock    -> read state, pick step │
+        │    unlock  -> slow I/O              │
+        │               (upload / report)     │
+        │    lock    -> record result         │
+        └──────────────────┬──────────────────┘
+                           │ Done(uid), then one of:
+           ┌───────────────┼────────────────────┐
+           ▼               ▼                    ▼
+    AddAfter(uid, d)  AddRateLimited(uid)   Forget(uid)
+    next deadline     failed, retry with    nothing pending
+                      backoff
+```
+
+#### What the workqueue provides
+
+| Needed behavior | Provided by the workqueue |
+|---|---|
+| Handle an actor when it comes due (upload due, detach due) | `AddAfter(uid, d)`, backed by a heap + timer |
+| Keep only the earliest deadline per actor | `AddAfter` on a uid that is already waiting only updates it if the new time is earlier |
+| No concurrent background work for one actor (at most one upload per actor, upload and detach never concurrent) | One key is never processed by two workers at once. An `Add` during processing makes it run once more after `Done()` |
+| Cap the number of concurrent uploads | The number of workers N |
+| Backoff after an upload / report failure | `AddRateLimited(uid)`, and `Forget(uid)` on success. Backoff state is in memory only, so after an atelet restart it resets and atelet retries at once |
+| Inject a fake clock in tests | `TypedRateLimitingQueueConfig.Clock` |
+| Observability | Built-in metrics: depth, latency, work duration, retries |
+
+#### Pseudocode
 
 ```go
-type timerKind int
-
-const (
-    timerUpload timerKind = iota
-    timerDetach
+queue := workqueue.NewTypedRateLimitingQueueWithConfig(
+    workqueue.NewTypedItemExponentialFailureRateLimiter[string](10*time.Second, uploadDelay),
+    workqueue.TypedRateLimitingQueueConfig[string]{Name: "actor-snapshots", Clock: clk},
 )
 
-type scheduledItem struct {
-    due  time.Time
-    uid  string
-    kind timerKind
+func (c *controller) worker(ctx context.Context) {
+    for {
+        uid, shutdown := c.queue.Get()
+        if shutdown {
+            return
+        }
+        c.process(ctx, uid)
+        c.queue.Done(uid)
+    }
 }
 
-// snapshotScheduler fires upload and detach work for every actor on the node.
-type snapshotScheduler struct {
-    mu    sync.Mutex
-    items itemHeap // min-heap ordered by due
-    wake  chan struct{}
-    clock clock.Clock // injectable for tests
+func (c *controller) process(ctx context.Context, uid string) {
+    next, err := c.reconcile(ctx, uid)
+    switch {
+    case err != nil:
+        c.queue.AddRateLimited(uid) // upload or report failed: back off
+    case !next.IsZero():
+        c.queue.Forget(uid)
+        c.queue.AddAfter(uid, next.Sub(c.clock.Now()))
+    default:
+        c.queue.Forget(uid) // nothing pending
+    }
+}
+
+// reconcile does at most one step for the actor and returns when it next
+// needs attention (zero if never).
+func (c *controller) reconcile(ctx context.Context, uid string) (time.Time, error) {
+    e, ok := c.mgr.tryLock(uid)
+    if !ok {
+        if e == nil {
+            return time.Time{}, nil // actor gone (Terminate / detach finished)
+        }
+        // A foreground RPC holds the lock: look again shortly.
+        return c.clock.Now().Add(2 * time.Second), nil
+    }
+    st := e.state
+    now := c.clock.Now()
+    switch {
+    case st.DetachPhase != detachNone:
+        return c.continueDetach(ctx, e) // upload if needed, report, delete
+    case !st.SuspendedAt.IsZero() && !now.Before(st.SuspendedAt.Add(detachDelay)):
+        return c.startDetach(ctx, e) // DetachPhase = detaching, then continue
+    case !st.PendingSince.IsZero() && !now.Before(st.PendingSince.Add(uploadDelay)):
+        return c.upload(ctx, e) // Uploading = latest local, I/O without lock
+    case st.ReportedVersion < st.StateVersion:
+        return c.report(ctx, e) // send current state, I/O without lock
+    }
+    e.mu.Unlock()
+    return earliest(uploadDue(st), detachDue(st)), nil
 }
 ```
 
-- **Arm / re-arm**: just push a new item, without removing the old one.
-- **Firing**: the scheduler pops due items and hands them to a worker, which takes that actor's lock with `TryLock`:
-  - Lock not available (a foreground RPC holds it) → push the item back a few seconds later, and the worker moves on to other actors. The number of workers is capped, so a worker must not block on an actor that is restoring.
-  - Once it has the lock, it **re-checks** the state before deciding whether to act:
-    - upload: `PendingSince` is non-zero and `now >= max(PendingSince + uploadDelay, retryNotBefore)`.
-    - detach: `SuspendedAt` is non-zero, `DetachPhase` is empty, and `now >= SuspendedAt + detachDelay`.
-    - If the check fails, the item is dropped. Superseded old items all expire naturally through this step, with no explicit cancel needed.
-- **Concurrency limit**: the number of workers caps how many uploads run at once, so hundreds of actors coming due together do not saturate the node's bandwidth.
+- Every branch follows the rules in the Concurrency section: hold the lock to change state, release it for slow I/O, then take it again to record the result.
+- One reconcile does only one step. After a step it calls `Add(uid)` to run again right away, until nothing is due.
+
+#### Who puts an actor in the queue
+
+| When | Call |
+|---|---|
+| `Checkpoint` completes | `AddAfter(uid, PendingSince + uploadDelay)` and `AddAfter(uid, SuspendedAt + detachDelay)`. Only the earlier deadline takes effect |
+| `Restore` | No call. When the already queued detach deadline comes due, reconcile sees `SuspendedAt == 0` and does nothing |
+| Upload / report succeeds | `process` calls `AddAfter` with the deadline reconcile returned |
+| Upload / report fails | `AddRateLimited(uid)` |
+| Disk pressure | Pick the suspended actors to detach, mark them to skip `detachDelay`, then `Add(uid)` |
+| `DetachActor` RPC | Set `DetachPhase = detaching` under the lock, `Add(uid)`, and return once this actor's detach finishes |
+| atelet restart | Scan the state files and `Add(uid)` for each actor |
 
 ### Invariants
 
@@ -737,7 +874,7 @@ type snapshotScheduler struct {
 | Report succeeds | `ReportedVersion` = the `StateVersion` sent in this report | — |
 | Detach starts (timer / disk pressure / `DetachActor`) | `DetachPhase = detaching` | Stop the detach timer |
 | Detach: ensure durable | If the in-flight upload is not the latest, cancel it. If it is the latest, wait for it to finish. If the latest is not durable, upload it immediately (without waiting for `uploadDelay`) | Stop the upload timer |
-| Detach: report | `StateVersion++` (latest local becomes empty). Send `ReportActorSnapshotState` immediately, and retry with backoff on failure | — |
+| Detach: report | `StateVersion++` (`local_snapshots` becomes empty). Send `ReportActorSnapshotState` immediately, and retry with backoff on failure | — |
 | Detach: report acked (or `NotFound`) | `DetachPhase = detached` | — |
 | Detach: report retries exceed `detachReportTimeout` | If the latest snapshot is durable, `DetachPhase = detached`. The report keeps retrying | — |
 | Detach: delete | Delete the snapshot directories under the lock. `LocalSnapshots = nil`. If the report was acked, delete the state file and actor dir. Otherwise keep the state file as a tombstone | — |
