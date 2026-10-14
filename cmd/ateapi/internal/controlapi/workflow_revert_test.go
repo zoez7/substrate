@@ -16,6 +16,7 @@ package controlapi
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store/storetest"
@@ -187,15 +188,17 @@ func TestRevertActor_ReturnsActorToItsSnapshot(t *testing.T) {
 
 			// If the actor runs again and takes another snapshot, it must
 			// allocate generation 4 rather than reusing 2 or 3.
-			running := mustUpdateActorStatus(t, ctx, st, reverted, func(s *ateapipb.ActorStatus) {
+			mustUpdateActorStatus(t, ctx, st, reverted, func(s *ateapipb.ActorStatus) {
 				s.State = ateapipb.ActorState_ACTOR_STATE_RUNNING
+				s.WorkerAssignment = wireTestAssignment()
 			})
-			tmpl := &ateapipb.ActorTemplate{
-				SnapshotConfig: &ateapipb.SnapshotConfig{StorageLocation: "gs://snapshots/"},
+			w.dialer = newDanglingDialer()
+			if _, err := w.SuspendActor(ctx, actorRef); !errors.Is(err, ErrNoAteletOnNode) {
+				t.Fatalf("SuspendActor after revert = %v, want ErrNoAteletOnNode", err)
 			}
-			suspending, err := w.ensureMarkedSuspending(ctx, actorRef, running, tmpl)
+			suspending, err := st.GetActor(ctx, actorRef)
 			if err != nil {
-				t.Fatalf("ensureMarkedSuspending after revert: %v", err)
+				t.Fatalf("GetActor after post-revert suspend: %v", err)
 			}
 			if got := suspending.GetStatus().GetLastAssignedGeneration(); got != 4 {
 				t.Errorf("last_assigned_generation after post-revert suspend = %d, want 4", got)

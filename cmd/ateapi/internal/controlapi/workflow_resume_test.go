@@ -1046,15 +1046,19 @@ func TestLoadActorForResume_RunningActorShortCircuits(t *testing.T) {
 	}
 }
 
-// capturingAtelet records the last Restore and Run request it receives, so a
-// test can assert on the exact wire request the resume workflow sends.
+// capturingAtelet records the last Restore, Run, Checkpoint, and
+// PromoteSnapshot requests it receives, so a test can assert on the exact wire
+// request a workflow sends. Optional hooks run after recording the request.
 type capturingAtelet struct {
 	ateletpb.UnimplementedAteomHerderServer
 
-	mu         sync.Mutex
-	restore    *ateletpb.RestoreRequest
-	run        *ateletpb.RunRequest
-	checkpoint *ateletpb.CheckpointRequest
+	mu           sync.Mutex
+	restore      *ateletpb.RestoreRequest
+	run          *ateletpb.RunRequest
+	checkpoint   *ateletpb.CheckpointRequest
+	promote      *ateletpb.PromoteSnapshotRequest
+	onCheckpoint func(context.Context, *ateletpb.CheckpointRequest) error
+	onPromote    func(context.Context, *ateletpb.PromoteSnapshotRequest) error
 }
 
 func (f *capturingAtelet) Restore(ctx context.Context, req *ateletpb.RestoreRequest) (*ateletpb.RestoreResponse, error) {
@@ -1073,8 +1077,14 @@ func (f *capturingAtelet) Run(ctx context.Context, req *ateletpb.RunRequest) (*a
 
 func (f *capturingAtelet) Checkpoint(ctx context.Context, req *ateletpb.CheckpointRequest) (*ateletpb.CheckpointResponse, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.checkpoint = proto.Clone(req).(*ateletpb.CheckpointRequest)
+	hook := f.onCheckpoint
+	f.mu.Unlock()
+	if hook != nil {
+		if err := hook(ctx, req); err != nil {
+			return nil, err
+		}
+	}
 	return &ateletpb.CheckpointResponse{}, nil
 }
 
@@ -1085,6 +1095,28 @@ func (f *capturingAtelet) checkpointRequest() *ateletpb.CheckpointRequest {
 		return nil
 	}
 	return proto.Clone(f.checkpoint).(*ateletpb.CheckpointRequest)
+}
+
+func (f *capturingAtelet) PromoteSnapshot(ctx context.Context, req *ateletpb.PromoteSnapshotRequest) (*ateletpb.PromoteSnapshotResponse, error) {
+	f.mu.Lock()
+	f.promote = proto.Clone(req).(*ateletpb.PromoteSnapshotRequest)
+	hook := f.onPromote
+	f.mu.Unlock()
+	if hook != nil {
+		if err := hook(ctx, req); err != nil {
+			return nil, err
+		}
+	}
+	return &ateletpb.PromoteSnapshotResponse{}, nil
+}
+
+func (f *capturingAtelet) promoteRequest() *ateletpb.PromoteSnapshotRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.promote == nil {
+		return nil
+	}
+	return proto.Clone(f.promote).(*ateletpb.PromoteSnapshotRequest)
 }
 
 // requests returns the recorded Restore and Run requests, nil for an RPC that

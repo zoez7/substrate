@@ -485,12 +485,15 @@ func TestDeleteActor_CollectsSnapshotsAfterWorkerDelete(t *testing.T) {
 				})
 			}
 
-			actorWorkflow := NewActorWorkflow(persistence, nil, nil, nil, nil, nil, "", nil, objectstoreplugintest.ControlClient(objects))
+			actorWorkflow := NewActorWorkflow(persistence, nil, newDanglingDialer(), nil, nil, nil, "", nil, objectstoreplugintest.ControlClient(objects))
 			// Suspend the actor as far as it gets: MarkSuspending mints the
 			// in-progress URI, and the checkpoint writes under it
-			actor, err := actorWorkflow.ensureMarkedSuspending(ctx, actorRef, actor, template)
+			if _, err := actorWorkflow.SuspendActor(ctx, actorRef); !errors.Is(err, ErrNoAteletOnNode) {
+				t.Fatalf("SuspendActor = %v, want ErrNoAteletOnNode", err)
+			}
+			actor, err := persistence.GetActor(ctx, actorRef)
 			if err != nil {
-				t.Fatalf("ensureMarkedSuspending: %v", err)
+				t.Fatalf("GetActor: %v", err)
 			}
 			freshSnap := findLatestDurableSnapshot(actor.GetStatus(), ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING)
 			fresh := mustParseSnapshotURI(t, freshSnap.GetDurableSnapshot().GetObject().GetSnapshotUri())

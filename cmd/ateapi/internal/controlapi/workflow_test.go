@@ -16,6 +16,7 @@ package controlapi
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
@@ -47,9 +48,9 @@ func TestActorStateChangeRecords(t *testing.T) {
 		{
 			name:      "suspend marks the actor suspending",
 			seedState: ateapipb.ActorState_ACTOR_STATE_RUNNING,
-			transition: func(t *testing.T, w *ActorWorkflow, ref resources.ActorRef, actor *ateapipb.Actor, tmpl *ateapipb.ActorTemplate) {
-				if _, err := w.ensureMarkedSuspending(context.Background(), ref, actor, tmpl); err != nil {
-					t.Fatalf("ensureMarkedSuspending: %v", err)
+			transition: func(t *testing.T, w *ActorWorkflow, ref resources.ActorRef, _ *ateapipb.Actor, _ *ateapipb.ActorTemplate) {
+				if _, err := w.SuspendActor(context.Background(), ref); !errors.Is(err, ErrNoAteletOnNode) {
+					t.Fatalf("SuspendActor = %v, want ErrNoAteletOnNode after marking SUSPENDING", err)
 				}
 			},
 			wantOp:     ateattr.OperationSuspend,
@@ -59,9 +60,9 @@ func TestActorStateChangeRecords(t *testing.T) {
 		{
 			name:      "pause marks the actor suspending",
 			seedState: ateapipb.ActorState_ACTOR_STATE_RUNNING,
-			transition: func(t *testing.T, w *ActorWorkflow, ref resources.ActorRef, actor *ateapipb.Actor, tmpl *ateapipb.ActorTemplate) {
-				if _, err := w.ensureMarkedPausing(context.Background(), ref, actor, tmpl); err != nil {
-					t.Fatalf("ensureMarkedPausing: %v", err)
+			transition: func(t *testing.T, w *ActorWorkflow, ref resources.ActorRef, _ *ateapipb.Actor, _ *ateapipb.ActorTemplate) {
+				if _, err := w.PauseActor(context.Background(), ref); !errors.Is(err, ErrNoAteletOnNode) {
+					t.Fatalf("PauseActor = %v, want ErrNoAteletOnNode after marking SUSPENDING", err)
 				}
 			},
 			wantOp:     ateattr.OperationPause,
@@ -100,7 +101,13 @@ func TestActorStateChangeRecords(t *testing.T) {
 			}
 
 			actorRef := resources.ActorRef{Atespace: "team-a", Name: "id1"}
-			seedWorkflowActor(t, ctx, persistence, actorRef, tmplAtespace, tmplName, tt.seedState)
+			var seedOpts []func(*ateapipb.Actor)
+			if tt.seedState == ateapipb.ActorState_ACTOR_STATE_RUNNING {
+				seedOpts = append(seedOpts, func(a *ateapipb.Actor) {
+					a.Status.WorkerAssignment = wireTestAssignment()
+				})
+			}
+			seedWorkflowActor(t, ctx, persistence, actorRef, tmplAtespace, tmplName, tt.seedState, seedOpts...)
 			actor, err := persistence.GetActor(ctx, actorRef)
 			if err != nil {
 				t.Fatalf("get actor: %v", err)
@@ -110,7 +117,7 @@ func TestActorStateChangeRecords(t *testing.T) {
 				t.Fatalf("get template: %v", err)
 			}
 
-			w := &ActorWorkflow{store: persistence}
+			w := &ActorWorkflow{store: persistence, dialer: newDanglingDialer()}
 			tt.transition(t, w, actorRef, actor, tmpl)
 
 			// The logs exporter is on, so the record goes to OTLP only.
