@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"go.ate.dev/substrate/internal/apierror"
+	"go.ate.dev/substrate/internal/ateinterceptors"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
@@ -97,7 +98,7 @@ func Dial(path string, readyWait time.Duration) (*grpc.ClientConn, error) {
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
 		grpc.WithConnectParams(reconnectParams),
-		grpc.WithUnaryInterceptor(boundedWaitForReady(readyWait)),
+		grpc.WithChainUnaryInterceptor(boundedWaitForReady(readyWait), ateinterceptors.ClientUnaryInterceptor),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("while dialing plugin at %s: %w", path, err)

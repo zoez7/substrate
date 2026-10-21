@@ -61,25 +61,30 @@ func ateletCrashMessage(rpc string, err error) string {
 // ateletErrorCrashesActor reports whether a failed call to atelet's rpc should
 // crash the actor.
 func ateletErrorCrashesActor(ctx context.Context, isTerminateRPC bool, err error) bool {
+	crash, _ := classifyAteletError(ctx, isTerminateRPC, err)
+	return crash
+}
+
+func classifyAteletError(ctx context.Context, isTerminateRPC bool, err error) (crash bool, reason string) {
 	// atelet.Terminate runs while the actor is being reverted or deleted. Crashing
 	// would clear the worker assignment the retry needs to terminate a sandbox
 	// that may still be running and to detach its volumes.
 	if isTerminateRPC {
-		return false
+		return false, "terminate_rpc"
 	}
 
 	// Workflow's own context ended: the caller went away or the actor lease
 	// was lost.
 	if ctx.Err() != nil {
-		return false
+		return false, "caller_context_done"
 	}
 
-	switch status.Code(err) {
+	switch code := status.Code(err); code {
 	// Usually transport errors or atelet retriable errors.
 	case codes.Unavailable, codes.Canceled, codes.DeadlineExceeded:
-		return false
+		return false, "retriable_code_" + code.String()
 	default:
-		return true
+		return true, "non_retriable_code_" + code.String()
 	}
 }
 
@@ -87,7 +92,21 @@ func ateletErrorCrashesActor(ctx context.Context, isTerminateRPC bool, err error
 // It crashes the actor if ateletErrorCrashesActor says so, and otherwise
 // returns the error for the operation to be retried.
 func handleAteletError(ctx context.Context, st crashActorStore, actorRef resources.ActorRef, opName, rpc string, isTerminateRPC bool, err error) error {
-	if ateletErrorCrashesActor(ctx, isTerminateRPC, err) {
+	crash, reason := classifyAteletError(ctx, isTerminateRPC, err)
+	decision := "retry"
+	if crash {
+		decision = "crash"
+	}
+	slog.LogAttrs(ctx, slog.LevelWarn, "Atelet error classified",
+		append(ateattr.ActorRefLogAttrs(actorRef),
+			slog.String("op", opName),
+			slog.String("rpc", rpc),
+			slog.String("code", status.Code(err).String()),
+			slog.String("decision", decision),
+			slog.String("reason", reason),
+			slog.Any("err", err),
+		)...)
+	if crash {
 		slog.LogAttrs(ctx, slog.LevelError, "Setting Actor to crashed due to Atelet error",
 			append(ateattr.ActorRefLogAttrs(actorRef), slog.Any("err", err))...)
 		if cerr := crashActor(ctx, st, actorRef, opName, ateletCrashMessage(rpc, err)); cerr != nil {

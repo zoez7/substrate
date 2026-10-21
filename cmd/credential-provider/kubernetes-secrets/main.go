@@ -39,6 +39,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
+	"go.ate.dev/substrate/internal/ateinterceptors"
 	"go.ate.dev/substrate/internal/credbundle"
 	"go.ate.dev/substrate/internal/installdefaults"
 	"go.ate.dev/substrate/internal/preview"
@@ -120,6 +121,7 @@ func run(ctx context.Context) error {
 	srv := grpc.NewServer(
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 		grpc.Creds(creds),
+		grpc.UnaryInterceptor(ateinterceptors.LoggingServerUnaryInterceptor),
 	)
 	reflection.Register(srv)
 	provider := NewServer(client, nsAuth)

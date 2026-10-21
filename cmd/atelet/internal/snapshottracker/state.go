@@ -23,6 +23,7 @@ import (
 
 	"go.ate.dev/substrate/cmd/atelet/internal/ateletpath"
 	"go.ate.dev/substrate/cmd/atelet/internal/atomicfile"
+	"go.ate.dev/substrate/internal/ateattr"
 	"go.ate.dev/substrate/internal/nodepath"
 )
 
@@ -33,7 +34,9 @@ import (
 // carries on from it, and a restart loses what changed.
 func (t *Tracker) saveLocked(a *actorSnapshots) {
 	if err := t.writeStateLocked(a); err != nil {
-		slog.Warn("Failed to save the actor's snapshot state", slog.String("actorUID", a.actorUID), slog.Any("err", err))
+		slog.Warn("Failed to save the actor's snapshot state",
+			append(actorAttrs(a.actorUID, a.actorRef()), slog.Any("err", err))...,
+		)
 	}
 }
 
@@ -41,7 +44,9 @@ func (t *Tracker) saveLocked(a *actorSnapshots) {
 // and returns the error if writing fails.
 func (t *Tracker) writeStateLocked(a *actorSnapshots) error {
 	if _, err := os.Stat(ateletpath.ActorPath(a.actorUID)); errors.Is(err, os.ErrNotExist) {
-		slog.Warn("Dropping the snapshot state of an actor whose directory is gone", slog.String("actorUID", a.actorUID))
+		slog.Warn("Dropping the snapshot state of an actor whose directory is gone",
+			actorAttrs(a.actorUID, a.actorRef())...,
+		)
 		a.unsaved = false
 		t.undurableActorsTally.forget(a.actorUID)
 		return nil
@@ -69,7 +74,7 @@ func readSnapshotState(actorUID string) *actorSnapshots {
 		err = json.Unmarshal(data, &rec)
 	}
 	if err != nil {
-		slog.Warn("Skipping an unreadable snapshot state file", slog.String("actorUID", actorUID), slog.Any("err", err))
+		slog.Warn("Skipping an unreadable snapshot state file", slog.String(string(ateattr.ActorUIDKey), actorUID), slog.Any("err", err))
 		return nil
 	}
 	return &actorSnapshots{actorUID: actorUID, actorSnapshotsRecord: rec}

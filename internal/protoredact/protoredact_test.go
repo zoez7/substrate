@@ -431,7 +431,7 @@ func TestDebugRedactFieldsArePinned(t *testing.T) {
 }
 
 // secretLikeName matches field names that usually hold a credential.
-var secretLikeName = regexp.MustCompile(`(?i)jwt|token|secret|passw|credential|private_?key|api_?key|bearer|authorization|cookie`)
+var secretLikeName = regexp.MustCompile(`(?i)jwt|token|secret|passw|private|credential|key|bearer|authorization|cookie`)
 
 // TestSecretLikeFieldsAreLabeled catches a new field that looks like it holds
 // a credential but was added without debug_redact, which the log handler
@@ -441,10 +441,20 @@ func TestSecretLikeFieldsAreLabeled(t *testing.T) {
 	notSecret := map[string]string{
 		"page_token":                             "opaque list cursor",
 		"next_page_token":                        "opaque list cursor",
+		"ateapi.AttributeEntry.key":              "workload attribute name, not a secret key",
+		"atelet.AttributeEntry.key":              "workload attribute name, not a secret key",
 		"ateapi.CredentialHeader.credential_uri": "ate-secret:// reference to a credential, not the value",
 		"ateapi.CredentialHeader.actor_jwt":      "ActorJwtSource: audiences and lifetime for minting, not a token",
+		"glutton.WriteRAMRequest.key":            "benchmarking key-value store key",
+		"glutton.ReadRAMRequest.key":             "benchmarking key-value store key",
+		"glutton.WriteDiskRequest.key":           "benchmarking key-value store key",
+		"glutton.ReadDiskRequest.key":            "benchmarking key-value store key",
+		"glutton.IngestRequest.key":              "benchmarking key-value store key",
 	}
 	forEachField(func(fd protoreflect.FieldDescriptor) {
+		if fd.ContainingMessage().IsMapEntry() {
+			return
+		}
 		if !secretLikeName.MatchString(string(fd.Name())) || isDebugRedact(fd) {
 			return
 		}
@@ -456,6 +466,20 @@ func TestSecretLikeFieldsAreLabeled(t *testing.T) {
 		}
 		t.Errorf("%s looks like a credential but has no debug_redact; label it, or add it to notSecret with the reason", fd.FullName())
 	})
+	for _, file := range ourProtoFiles {
+		svcs := file.Services()
+		for i := 0; i < svcs.Len(); i++ {
+			methods := svcs.Get(i).Methods()
+			for j := 0; j < methods.Len(); j++ {
+				m := methods.Get(j)
+				for _, md := range []protoreflect.MessageDescriptor{m.Input(), m.Output()} {
+					if md == nil {
+						t.Errorf("method %s has nil message descriptor", m.FullName())
+					}
+				}
+			}
+		}
+	}
 }
 
 // TestOurProtoFilesAreAllListed fails when a .proto file is added to the

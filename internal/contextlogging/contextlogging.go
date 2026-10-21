@@ -16,10 +16,13 @@ package contextlogging
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"reflect"
 
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
 	"go.ate.dev/substrate/internal/ateattr"
@@ -147,11 +150,22 @@ func redactAttrs(attrs []slog.Attr) []slog.Attr {
 	return out
 }
 
-// redactValue returns v with every proto.Message that needs redaction
-// replaced by its redacted copy, and whether anything changed. A LogValuer
-// is resolved and counts as changed, so LogValue runs once per line and the
-// record keeps its result. Other kinds are returned as they are with nothing
-// allocated.
+var protoJSONMarshaler = protojson.MarshalOptions{UseProtoNames: true}
+
+func isNilProto(m proto.Message) bool {
+	if m == nil {
+		return true
+	}
+	v := reflect.ValueOf(m)
+	return v.Kind() == reflect.Pointer && v.IsNil()
+}
+
+// redactValue returns v with every non-nil proto.Message redacted (via
+// protoredact.Redacted) and marshaled to json.RawMessage with protojson so
+// enums, timestamps, durations, and oneofs render in canonical protobuf JSON.
+// A LogValuer is resolved and counts as changed, so LogValue runs once per line
+// and the record keeps its result. Other kinds (and typed-nil proto pointers)
+// are returned as they are with nothing allocated.
 func redactValue(v slog.Value) (slog.Value, bool) {
 	switch v.Kind() {
 	case slog.KindLogValuer:
@@ -159,9 +173,14 @@ func redactValue(v slog.Value) (slog.Value, bool) {
 		return r, true
 	case slog.KindAny:
 		if m, ok := v.Any().(proto.Message); ok {
-			if r, changed := protoredact.Redacted(m); changed {
-				return slog.AnyValue(r), true
+			if isNilProto(m) {
+				return v, false
 			}
+			r, _ := protoredact.Redacted(m)
+			if raw, err := protoJSONMarshaler.Marshal(r); err == nil {
+				return slog.AnyValue(json.RawMessage(raw)), true
+			}
+			return slog.AnyValue(r), true
 		}
 	case slog.KindGroup:
 		g := v.Group()

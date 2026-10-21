@@ -16,11 +16,25 @@ package snapshottracker
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"go.ate.dev/substrate/internal/apierror"
 	"go.ate.dev/substrate/internal/proto/ateletpb"
 )
+
+func (t *Tracker) logCommitLocked(a *actorSnapshots, kind string, snap SnapshotRef, before, after *ateletpb.ActorSnapshotState) {
+	slog.Info("Snapshot committed",
+		append(actorAttrs(a.actorUID, snap.Actor),
+			slog.String("kind", kind),
+			slog.String("snapshot", snap.uuid()),
+			slog.Int("generation", int(snap.generation())),
+			slog.Any("before", before),
+			slog.Any("after", after),
+			slog.Time("detachAt", a.DetachAt),
+		)...,
+	)
+}
 
 // CommitLocal records snap, just stored in the actor's local checkpoint
 // directory by a Checkpoint in either upload mode, as the actor's latest local
@@ -42,6 +56,7 @@ func (t *Tracker) CommitLocal(actorUID string, snap SnapshotRef) *ateletpb.Actor
 		}
 		return t.stateLocked(a)
 	}
+	before := t.stateLocked(a)
 	t.setLatestLocalLocked(a, snap)
 	a.Started = false
 	if a.UndurableSince.IsZero() && a.uploadNeeded(snap) {
@@ -59,8 +74,10 @@ func (t *Tracker) CommitLocal(actorUID string, snap SnapshotRef) *ateletpb.Actor
 	}
 	t.cancelReportLocked(a)
 	t.saveLocked(a)
+	after := t.stateLocked(a)
+	t.logCommitLocked(a, "local", snap, before, after)
 	t.requeueLocked(a)
-	return t.stateLocked(a)
+	return after
 }
 
 // CommitDurable records snap, just uploaded by a Checkpoint under
@@ -86,6 +103,7 @@ func (t *Tracker) CommitDurable(actorUID string, snap SnapshotRef) *ateletpb.Act
 		}
 		return t.stateLocked(a)
 	}
+	before := t.stateLocked(a)
 	a.LatestDurable = snap.clone()
 	a.Started = false
 	if a.LatestLocal != nil && a.LatestLocal.generation() < snap.generation() {
@@ -93,7 +111,9 @@ func (t *Tracker) CommitDurable(actorUID string, snap SnapshotRef) *ateletpb.Act
 	}
 	t.cancelReportLocked(a)
 	t.durableCommittedLocked(a)
-	return t.durableStateLocked(a)
+	after := t.durableStateLocked(a)
+	t.logCommitLocked(a, "durable", snap, before, after)
+	return after
 }
 
 // CommittedCheckpointState returns the actor's state for a Checkpoint whose
@@ -165,6 +185,7 @@ func (t *Tracker) CommitPromoted(actorUID string, snap SnapshotRef) *ateletpb.Ac
 	if sameUUID(a.LatestLocal, &snap) {
 		snap.CommitTime = a.LatestLocal.CommitTime
 	}
+	before := t.stateLocked(a)
 	a.LatestDurable = snap.clone()
 	// A promote with a local snapshot still on the node returns the latest
 	// state to the control plane. Once LatestLocal is nil, a pending detach
@@ -174,7 +195,9 @@ func (t *Tracker) CommitPromoted(actorUID string, snap SnapshotRef) *ateletpb.Ac
 		t.cancelReportLocked(a)
 	}
 	t.durableCommittedLocked(a)
-	return t.durableStateLocked(a)
+	after := t.durableStateLocked(a)
+	t.logCommitLocked(a, "promoted", snap, before, after)
+	return after
 }
 
 // BeginStart records that a Run or Restore is starting the actor on this node,
@@ -197,7 +220,7 @@ func (t *Tracker) CommitPromoted(actorUID string, snap SnapshotRef) *ateletpb.Ac
 func (t *Tracker) BeginStart(ctx context.Context, actorUID string) (end func(), err error) {
 	t.lock(actorUID)
 	defer t.unlock(actorUID)
-	a, err := t.waitForDetachLocked(ctx, actorUID, nil)
+	a, err := t.waitForDetachLocked(ctx, actorUID, "start", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -211,6 +234,9 @@ func (t *Tracker) BeginStart(ctx context.Context, actorUID string) (end func(), 
 				a.DetachAt, a.Started, a.unsaved = detachAt, started, unsaved
 				return nil, apierror.Unavailable("while recording the start of actor %s: %v", actorUID, err)
 			}
+			slog.InfoContext(ctx, "Detach unscheduled by start",
+				append(actorAttrs(actorUID, a.actorRef()), slog.Time("previousDetachAt", detachAt))...,
+			)
 		}
 		// No detach is scheduled now, so failed detaches have nothing left
 		// to retry. Keep the backoff when an upload is still due.
@@ -244,7 +270,9 @@ func (t *Tracker) BeginStart(ctx context.Context, actorUID string) (end func(), 
 func (t *Tracker) BeginCheckpoint(ctx context.Context, actorUID string, snap *ateletpb.Snapshot, mode ateletpb.UploadMode) (committed bool, end func(), err error) {
 	t.lock(actorUID)
 	defer t.unlock(actorUID)
-	a, err := t.waitForDetachLocked(ctx, actorUID, func(a *actorSnapshots) error { return a.checkGeneration(snap) })
+	a, err := t.waitForDetachLocked(ctx, actorUID, "checkpoint", func(a *actorSnapshots) error {
+		return a.checkGeneration(snap)
+	})
 	if err != nil {
 		return false, nil, err
 	}

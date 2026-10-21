@@ -128,7 +128,10 @@ func run(ctx context.Context) error {
 	}
 	defer clients.Close()
 
-	srv := grpc.NewServer(grpc.Creds(creds))
+	srv := grpc.NewServer(
+		grpc.Creds(creds),
+		grpc.UnaryInterceptor(loggingUnaryInterceptor),
+	)
 	credproviderpb.RegisterCredentialProviderServer(srv, provider.NewServer(clients.For, authz, *fetchTimeout))
 
 	grpcLis, err := (&net.ListenConfig{}).Listen(ctx, "tcp", *listenAddr)
@@ -184,6 +187,29 @@ func gracefulStop(srv *grpc.Server, grace time.Duration) {
 		slog.Warn("graceful shutdown timed out; forcing stop", slog.Duration("grace", grace))
 		srv.Stop()
 	}
+}
+
+// loggingUnaryInterceptor logs each CredentialProvider RPC while omitting
+// FetchSecretResponse.opaque_bytes (marked debug_redact in credprovider.proto).
+func loggingUnaryInterceptor(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+	startTime := time.Now()
+	resp, err := handler(ctx, req)
+	var loggedResp any
+	if resp != nil {
+		if _, ok := resp.(*credproviderpb.FetchSecretResponse); ok {
+			loggedResp = struct{}{}
+		} else {
+			loggedResp = resp
+		}
+	}
+	slog.InfoContext(ctx, "Handle RPC",
+		slog.String("method", info.FullMethod),
+		slog.Any("req", req),
+		slog.Any("resp", loggedResp),
+		slog.Any("err", err),
+		slog.String("elapsed-time", time.Since(startTime).String()),
+	)
+	return resp, err
 }
 
 // healthHandler serves /healthz, which always succeeds so a draining pod is not

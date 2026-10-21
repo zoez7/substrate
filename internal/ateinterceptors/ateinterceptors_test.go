@@ -487,3 +487,89 @@ func TestServerUnaryInterceptorElidesListResponses(t *testing.T) {
 		t.Fatalf("interceptor mutated the response returned to the client")
 	}
 }
+
+func TestLoggingServerUnaryInterceptorPreservesStatusErrorAndLogs(t *testing.T) {
+	log := captureDefaultLog(t)
+	wantErr := status.Error(codes.NotFound, "snapshot not found")
+	_, err := LoggingServerUnaryInterceptor(context.Background(), &credproviderpb.FetchSecretRequest{Uri: "ate-secret://kubernetes.io/ns/name"}, &grpc.UnaryServerInfo{FullMethod: "/credprovider.CredentialProvider/FetchSecret"}, func(ctx context.Context, req interface{}) (interface{}, error) {
+		return nil, wantErr
+	})
+	if status.Code(err) != codes.NotFound {
+		t.Fatalf("code = %v, want NotFound", status.Code(err))
+	}
+	gotLog := log.String()
+	for _, want := range []string{`"msg":"Handle RPC"`, `"/credprovider.CredentialProvider/FetchSecret"`, `"ate-secret://kubernetes.io/ns/name"`, `"resp":null`} {
+		if !strings.Contains(gotLog, want) {
+			t.Errorf("log missing %s: %s", want, gotLog)
+		}
+	}
+}
+
+func TestClientUnaryInterceptorLogsAndRedacts(t *testing.T) {
+	log := captureDefaultLog(t)
+
+	const token = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJhY3RvciJ9.c2lnbmF0dXJl"
+	req := &ateapipb.MintActorJwtRequest{}
+	reply := &ateapipb.MintActorJwtResponse{}
+
+	invoker := func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, opts ...grpc.CallOption) error {
+		resp := reply.(*ateapipb.MintActorJwtResponse)
+		resp.ActorJwt = token
+		for _, opt := range opts {
+			if trOpt, ok := opt.(grpc.TrailerCallOption); ok && trOpt.TrailerAddr != nil {
+				*trOpt.TrailerAddr = metadata.Pairs(ServerElapsedTrailer, "1234")
+			}
+		}
+		return nil
+	}
+
+	if err := ClientUnaryInterceptor(context.Background(), "/ateapi.Control/MintActorJwt", req, reply, nil, invoker); err != nil {
+		t.Fatalf("ClientUnaryInterceptor failed: %v", err)
+	}
+
+	gotLog := log.String()
+	if strings.Contains(gotLog, token) {
+		t.Fatalf("log contains the actor JWT: %s", gotLog)
+	}
+	for _, want := range []string{
+		`"msg":"Call RPC"`,
+		`"method":"/ateapi.Control/MintActorJwt"`,
+		`"actor_jwt":"` + protoredact.Placeholder + `"`,
+		`"code":"OK"`,
+		`"server-elapsed-us":"1234"`,
+	} {
+		if !strings.Contains(gotLog, want) {
+			t.Errorf("log missing %s: %s", want, gotLog)
+		}
+	}
+	if reply.GetActorJwt() != token {
+		t.Fatalf("interceptor mutated reply: %q", reply.GetActorJwt())
+	}
+}
+
+func TestClientUnaryInterceptorLogsNullRespOnError(t *testing.T) {
+	log := captureDefaultLog(t)
+
+	req := &ateapipb.MintActorJwtRequest{}
+	reply := &ateapipb.MintActorJwtResponse{}
+
+	invoker := func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, opts ...grpc.CallOption) error {
+		return status.Error(codes.Unavailable, "connection reset")
+	}
+
+	err := ClientUnaryInterceptor(context.Background(), "/ateapi.Control/MintActorJwt", req, reply, nil, invoker)
+	if status.Code(err) != codes.Unavailable {
+		t.Fatalf("code = %v, want Unavailable", status.Code(err))
+	}
+
+	gotLog := log.String()
+	for _, want := range []string{
+		`"msg":"Call RPC"`,
+		`"resp":null`,
+		`"code":"Unavailable"`,
+	} {
+		if !strings.Contains(gotLog, want) {
+			t.Errorf("log missing %s: %s", want, gotLog)
+		}
+	}
+}

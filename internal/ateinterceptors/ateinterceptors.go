@@ -94,12 +94,19 @@ func InternalServerUnaryInterceptor(ctx context.Context, req any, info *grpc.Una
 
 	resp, err := handler(ctx, req)
 
+	elapsed := time.Since(startTime)
+
+	_ = grpc.SetTrailer(ctx, metadata.Pairs(
+		ServerElapsedTrailer,
+		strconv.FormatInt(elapsed.Microseconds(), 10),
+	))
+
 	slog.InfoContext(ctx, "Handle RPC",
 		slog.String("method", info.FullMethod),
 		slog.Any("req", req),
 		slog.Any("resp", respForLog(info.FullMethod, resp, err)),
 		slog.Any("err", err),
-		slog.String("elapsed-time", time.Since(startTime).String()),
+		slog.String("elapsed-time", elapsed.String()),
 	)
 
 	if err != nil {
@@ -127,4 +134,72 @@ func respForLog(method string, resp any, err error) any {
 		return fmt.Sprintf("<%s response elided, %d bytes>", name, proto.Size(m))
 	}
 	return resp
+}
+
+// LoggingServerUnaryInterceptor logs the request, response, error, and elapsed
+// time of an RPC, and returns the handler's error unchanged. Use this for
+// services whose handlers already return gRPC status errors directly.
+func LoggingServerUnaryInterceptor(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+	startTime := time.Now()
+
+	resp, err := handler(ctx, req)
+
+	elapsed := time.Since(startTime)
+
+	_ = grpc.SetTrailer(ctx, metadata.Pairs(
+		ServerElapsedTrailer,
+		strconv.FormatInt(elapsed.Microseconds(), 10),
+	))
+
+	slog.InfoContext(ctx, "Handle RPC",
+		slog.String("method", info.FullMethod),
+		slog.Any("req", req),
+		slog.Any("resp", respForLog(info.FullMethod, resp, err)),
+		slog.Any("err", err),
+		slog.String("elapsed-time", elapsed.String()),
+	)
+
+	return resp, err
+}
+
+// ClientUnaryInterceptor logs outbound unary RPC calls with the method, target,
+// request, response, error, status code, elapsed time, and server elapsed time
+// when reported via ServerElapsedTrailer.
+func ClientUnaryInterceptor(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+	startTime := time.Now()
+
+	var trailer metadata.MD
+	callOpts := make([]grpc.CallOption, len(opts)+1)
+	copy(callOpts, opts)
+	callOpts[len(opts)] = grpc.Trailer(&trailer)
+
+	err := invoker(ctx, method, req, reply, cc, callOpts...)
+
+	elapsed := time.Since(startTime)
+
+	var loggedResp any
+	if err == nil {
+		loggedResp = reply
+	}
+	var target string
+	if cc != nil {
+		target = cc.Target()
+	}
+
+	attrs := []any{
+		slog.String("method", method),
+		slog.String("target", target),
+		slog.Any("req", req),
+		slog.Any("resp", loggedResp),
+		slog.Any("err", err),
+		slog.String("code", status.Code(err).String()),
+		slog.String("elapsed-time", elapsed.String()),
+	}
+	if vals := trailer.Get(ServerElapsedTrailer); len(vals) > 0 {
+		attrs = append(attrs, slog.String("server-elapsed-us", vals[0]))
+	}
+
+	slog.InfoContext(ctx, "Call RPC", attrs...)
+
+	return err
 }

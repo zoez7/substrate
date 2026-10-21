@@ -16,9 +16,11 @@ package snapshottracker
 
 import (
 	"encoding/json"
+	"log/slog"
 	"time"
 
 	"go.ate.dev/substrate/internal/apierror"
+	"go.ate.dev/substrate/internal/ateattr"
 	"go.ate.dev/substrate/internal/proto/ateletpb"
 	"go.ate.dev/substrate/internal/resources"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -294,6 +296,28 @@ func (a *actorSnapshots) latestDurableActor() resources.ActorRef {
 	return a.LatestDurable.Actor
 }
 
+// actorRef returns the actor identity from whichever tracked snapshot is set.
+func (a *actorSnapshots) actorRef() resources.ActorRef {
+	for _, r := range []*SnapshotRef{a.LatestLocal, a.Uploading, a.LatestDurable} {
+		if r != nil && (r.Actor.Atespace != "" || r.Actor.Name != "") {
+			return r.Actor
+		}
+	}
+	return resources.ActorRef{}
+}
+
+// actorAttrs returns the canonical ate.* actor identity attributes for slog.
+func actorAttrs(actorUID string, actor resources.ActorRef) []any {
+	attrs := []any{slog.String(string(ateattr.ActorUIDKey), actorUID)}
+	if actor.Atespace != "" || actor.Name != "" {
+		attrs = append(attrs,
+			slog.String(string(ateattr.AtespaceKey), actor.Atespace),
+			slog.String(string(ateattr.ActorNameKey), actor.Name),
+		)
+	}
+	return attrs
+}
+
 // uploadNeeded reports whether ref still needs uploading: neither it nor a
 // newer snapshot is durable.
 func (a *actorSnapshots) uploadNeeded(ref SnapshotRef) bool {
@@ -348,6 +372,12 @@ func (a *actorSnapshots) clearSupersededUploading() (removed *SnapshotRef, clear
 	old := a.Uploading
 	a.Uploading = nil
 	a.uploadingFailed = false
+	slog.Info("Dropped superseded uploading snapshot",
+		append(actorAttrs(a.actorUID, old.Actor),
+			slog.String("snapshot", old.uuid()),
+			slog.Int("generation", int(old.generation())),
+		)...,
+	)
 	if !a.localSuperseded(old) {
 		return nil, true
 	}

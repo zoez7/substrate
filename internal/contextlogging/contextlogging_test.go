@@ -30,6 +30,7 @@ import (
 	"go.ate.dev/substrate/internal/protoredact"
 	"go.ate.dev/substrate/pkg/proto/ateapipb"
 	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 const (
@@ -226,11 +227,12 @@ func TestRedactValueReportsWhatItChanges(t *testing.T) {
 		{"int", slog.IntValue(1), false},
 		{"non-proto any", slog.AnyValue(struct{ X int }{1}), false},
 		{"nil any", slog.AnyValue(nil), false},
-		{"clean type", slog.AnyValue(&ateapipb.ObjectRef{Name: "n"}), false},
-		{"labeled type, nothing set", slog.AnyValue(envless), false},
+		{"typed nil clean type", slog.AnyValue((*ateapipb.ObjectRef)(nil)), false},
 		{"typed nil labeled type", slog.AnyValue((*ateapipb.MintActorJwtResponse)(nil)), false},
-		{"group of plain values", slog.GroupValue(slog.String("a", "b"), slog.Any("ref", &ateapipb.ObjectRef{})), false},
+		{"group of plain values", slog.GroupValue(slog.String("a", "b"), slog.Int("n", 1)), false},
 		{"empty group", slog.GroupValue(), false},
+		{"clean type converted to protojson", slog.AnyValue(&ateapipb.ObjectRef{Name: "n"}), true},
+		{"labeled type, nothing set converted to protojson", slog.AnyValue(envless), true},
 		{"sensitive", slog.AnyValue(sensitive), true},
 		{"group holding sensitive", slog.GroupValue(slog.String("a", "b"), slog.Group("in", slog.Any("r", sensitive))), true},
 		{"valuer", slog.AnyValue(stringValuer{}), true},
@@ -256,7 +258,7 @@ func TestRedactValueReportsWhatItChanges(t *testing.T) {
 }
 
 func TestRedactAttrsReturnsTheInputWhenNothingChanges(t *testing.T) {
-	in := []slog.Attr{slog.String("a", "b"), slog.Any("ref", &ateapipb.ObjectRef{Name: "n"}), slog.Group("g", slog.Int("n", 1))}
+	in := []slog.Attr{slog.String("a", "b"), slog.Any("ref", (*ateapipb.ObjectRef)(nil)), slog.Group("g", slog.Int("n", 1))}
 	out := redactAttrs(in)
 	if len(out) != len(in) || &out[0] != &in[0] {
 		t.Fatal("redactAttrs copied a slice with nothing to change")
@@ -270,8 +272,45 @@ func TestRedactAttrsReturnsTheInputWhenNothingChanges(t *testing.T) {
 	if in[3].Value.Group()[0].Value.Any().(*ateapipb.MintActorJwtResponse).GetActorJwt() != "token" {
 		t.Fatal("redactAttrs modified the input slice")
 	}
-	if out[3].Value.Group()[0].Value.Any().(*ateapipb.MintActorJwtResponse).GetActorJwt() != protoredact.Placeholder {
-		t.Fatal("redactAttrs did not mask the group member")
+	raw, ok := out[3].Value.Group()[0].Value.Any().(json.RawMessage)
+	if !ok || !strings.Contains(string(raw), protoredact.Placeholder) || strings.Contains(string(raw), "token") {
+		t.Fatalf("redactAttrs did not mask and marshal the group member: %s", raw)
+	}
+}
+
+func TestHandleFormatsProtoEnumsAndTimestampsWithProtoJSON(t *testing.T) {
+	ts := time.Date(2026, 4, 17, 6, 0, 0, 0, time.UTC)
+	meta := &ateapipb.ResourceMetadata{
+		Name:       "agent-1",
+		CreateTime: timestamppb.New(ts),
+	}
+	snap := &ateapipb.Snapshot{
+		Generation: 3,
+		Uuid:       "snap-3",
+		Owner:      ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR,
+		Fidelity:   ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+		Locality:   "node-1",
+		DurableSnapshot: &ateapipb.SnapshotStorage{
+			Status: ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING,
+		},
+	}
+	var buf bytes.Buffer
+	logger := slog.New(NewHandler(slog.NewJSONHandler(&buf, &slog.HandlerOptions{ReplaceAttr: dropTime})))
+	logger.Info("snapshot", slog.Any("meta", meta), slog.Any("snap", snap))
+
+	got := buf.String()
+	for _, want := range []string{
+		`"create_time":"2026-04-17T06:00:00Z"`,
+		`"generation":3`,
+		`"uuid":"snap-3"`,
+		`"owner":"SNAPSHOT_OWNER_ACTOR"`,
+		`"fidelity":"SNAPSHOT_FIDELITY_MEMORY"`,
+		`"locality":"node-1"`,
+		`"status":"SNAPSHOT_STORAGE_STATUS_PENDING"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("log missing %s\n got: %s", want, got)
+		}
 	}
 }
 
@@ -323,25 +362,12 @@ func TestHandleResolvesLogValuersOnce(t *testing.T) {
 }
 
 func TestHandleRebuildsOnlyWhenAnAttributeChanges(t *testing.T) {
-	// Same record through the bare JSON handler and through ours must match
-	// byte for byte when it carries only values redactValue leaves alone,
-	// including a proto of a labeled type with nothing set.
-	envless := &ateapipb.ActorTemplate{Containers: []*ateapipb.Container{{Name: "c", Image: "img"}}}
-	var plainBuf, oursBuf bytes.Buffer
-	plain := slog.New(slog.NewJSONHandler(&plainBuf, &slog.HandlerOptions{ReplaceAttr: dropTime}))
-	ours := slog.New(NewHandler(slog.NewJSONHandler(&oursBuf, &slog.HandlerOptions{ReplaceAttr: dropTime})))
-	for _, l := range []*slog.Logger{plain, ours} {
-		l.Info("x", slog.Any("tpl", envless), slog.Any("ref", &ateapipb.ObjectRef{Name: "n"}), slog.Int("n", 1), slog.String("a", "b"), slog.Bool("c", true), slog.Float64("f", 1.5), slog.Duration("d", time.Second))
-	}
-	if plainBuf.String() != oursBuf.String() {
-		t.Fatalf("records differ:\n plain: %s\n ours:  %s", plainBuf.String(), oursBuf.String())
-	}
-	// A record of plain values and clean types is scanned without
+	// A record of plain values and typed-nil proto pointers is scanned without
 	// allocating, whatever its size.
 	for _, attrs := range [][]slog.Attr{
 		{slog.Int("n", 1), slog.String("a", "b"), slog.Bool("c", true)},
-		{slog.Any("ref", &ateapipb.ObjectRef{Name: "n"}), slog.Any("resp", &ateapipb.ListActorsResponse{}), slog.Int("n", 1)},
-		{slog.Int("n", 1), slog.String("a", "b"), slog.Bool("c", true), slog.Float64("f", 1.5), slog.Duration("d", time.Second), slog.Any("ref", &ateapipb.ObjectRef{Name: "n"}), slog.Group("g", slog.String("k", "v"))},
+		{slog.Any("ref", (*ateapipb.ObjectRef)(nil)), slog.Any("resp", (*ateapipb.ListActorsResponse)(nil)), slog.Int("n", 1)},
+		{slog.Int("n", 1), slog.String("a", "b"), slog.Bool("c", true), slog.Float64("f", 1.5), slog.Duration("d", time.Second), slog.Any("ref", (*ateapipb.ObjectRef)(nil)), slog.Group("g", slog.String("k", "v"))},
 	} {
 		rec := slog.NewRecord(time.Now(), slog.LevelInfo, "x", 0)
 		rec.AddAttrs(attrs...)

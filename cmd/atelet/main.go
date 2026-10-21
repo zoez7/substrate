@@ -372,6 +372,7 @@ func main() {
 	}
 	// atelet acts for the system, not a user, so it always opts in to the
 	// preview features the server enables.
+	dialOpts = append(dialOpts, grpc.WithUnaryInterceptor(ateinterceptors.ClientUnaryInterceptor))
 	dialOpts = append(dialOpts, preview.DialOptionsWithOptIn()...)
 	ateapiConn, err := grpc.NewClient(*ateapiAddress, dialOpts...)
 	if err != nil {
@@ -506,7 +507,11 @@ func main() {
 		serverboot.Fatal(ctx, "Failed to restrict credential broker socket", err)
 	}
 
-	workerFacingSrv := grpc.NewServer(grpc.Creds(credentials.NewTLS(workerFacingTLS)))
+	workerFacingSrv := grpc.NewServer(
+		grpc.Creds(credentials.NewTLS(workerFacingTLS)),
+		grpc.StatsHandler(otelgrpc.NewServerHandler()),
+		grpc.UnaryInterceptor(ateinterceptors.LoggingServerUnaryInterceptor),
+	)
 
 	ateletpb.RegisterWorkerSupportServer(workerFacingSrv, &workerSupportServer{
 		workers: workerService,
@@ -1630,6 +1635,25 @@ func (s *Atelet) Restore(ctx context.Context, req *ateletpb.RestoreRequest) (res
 	var sandboxRec *sandboxAssetsRecord
 	localRec, localErr := readLocalSnapshot(localDir)
 	durable := req.GetSnapshot().GetObject()
+	trackerState := s.snapshots.State(actorUID)
+	restoreSource := "object"
+	if localErr == nil {
+		restoreSource = "local"
+	} else if durable == nil {
+		restoreSource = "none"
+	}
+	slog.InfoContext(ctx, "Restore source chosen",
+		slog.String(string(ateattr.AtespaceKey), actorRef.Atespace),
+		slog.String(string(ateattr.ActorNameKey), actorRef.Name),
+		slog.String(string(ateattr.ActorUIDKey), actorUID),
+		slog.String("snapshot", req.GetSnapshot().GetSnapshotUuid()),
+		slog.Int("generation", int(req.GetSnapshot().GetGeneration())),
+		slog.String("source", restoreSource),
+		slog.Any("local_err", localErr),
+		slog.Bool("has_object", durable != nil),
+		slog.String("tracker_latest_local", trackerState.GetLatestLocal().GetSnapshot().GetSnapshotUuid()),
+		slog.String("tracker_latest_durable", trackerState.GetLatestDurable().GetSnapshot().GetSnapshotUuid()),
+	)
 	if localErr == nil {
 		directLocal = true
 		checkpointDir = localDir
@@ -2236,6 +2260,7 @@ func (d *WorkerDialer) DialWorkerPod(ctx context.Context, podUID string) (*grpc.
 		"unix://"+workerSocketPath(podUID),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
+		grpc.WithUnaryInterceptor(ateinterceptors.ClientUnaryInterceptor),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("while creating atelet gRPC client connection: %w", err)

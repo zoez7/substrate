@@ -34,6 +34,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/grpc/status"
 	storagev1listers "k8s.io/client-go/listers/storage/v1"
 )
 
@@ -53,6 +54,10 @@ func stepSpan(ctx context.Context, name string) (context.Context, func(error) er
 		if err == nil {
 			return nil
 		}
+		slog.WarnContext(ctx, "Workflow step failed",
+			slog.String("step", name),
+			slog.String("code", status.Code(err).String()),
+			slog.Any("err", err))
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("workflow failed at step %s: %w", name, err)
@@ -63,10 +68,35 @@ func stepSpan(ctx context.Context, name string) (context.Context, func(error) er
 // already holds, so a re-entered workflow's trace shows which steps
 // fast-forwarded and where real work restarted.
 func markSkipped(ctx context.Context, reason string) {
+	slog.DebugContext(ctx, "Workflow step skipped", slog.String("reason", reason))
 	trace.SpanFromContext(ctx).SetAttributes(
 		attribute.Bool("step.skipped", true),
 		attribute.String("step.skip_reason", reason),
 	)
+}
+
+func logActorSnapshotsChanged(ctx context.Context, before, after *ateapipb.Actor, reason string) {
+	summarize := func(snaps []*ateapipb.Snapshot) []map[string]any {
+		out := make([]map[string]any, 0, len(snaps))
+		for _, s := range snaps {
+			out = append(out, map[string]any{
+				"gen":            s.GetGeneration(),
+				"uuid":           s.GetUuid(),
+				"locality":       s.GetLocality(),
+				"durable_status": s.GetDurableSnapshot().GetStatus().String(),
+			})
+		}
+		return out
+	}
+	attrs := ateattr.ActorLogAttrs(resources.ActorAttributionFromActor(after))
+	attrs = append(attrs,
+		slog.String("reason", reason),
+		slog.String("before_assigned_node", before.GetStatus().GetAssignedNode()),
+		slog.String("after_assigned_node", after.GetStatus().GetAssignedNode()),
+		slog.Any("before_snapshots", summarize(before.GetStatus().GetSnapshots())),
+		slog.Any("after_snapshots", summarize(after.GetStatus().GetSnapshots())),
+	)
+	slog.LogAttrs(ctx, slog.LevelInfo, "Actor snapshots changed", attrs...)
 }
 
 // logActorStateChanged records an actor state change. The last record for an

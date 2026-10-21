@@ -75,17 +75,22 @@ func (w *ActorWorkflow) ApplyReportedSnapshotState(ctx context.Context, actorRef
 		return err
 	}
 	if proto.Equal(applied.GetStatus(), before.GetStatus()) {
+		slog.DebugContext(leaseCtx, "Snapshot state report changed nothing",
+			slog.Any("actor", actorRef),
+			slog.String("node", node))
 		return nil
 	}
-	if _, err := w.store.UpdateActor(leaseCtx, actorRef, store.PreconditionFrom(before), func(toUpdate *ateapipb.Actor) error {
+	storedActor, err := w.store.UpdateActor(leaseCtx, actorRef, store.PreconditionFrom(before), func(toUpdate *ateapipb.Actor) error {
 		toUpdate.Status = applied.GetStatus()
 		return nil
-	}); err != nil {
+	})
+	if err != nil {
 		if errors.Is(err, store.ErrVersionConflict) {
 			return apierror.Aborted("concurrent update conflict, please retry")
 		}
 		return err
 	}
+	logActorSnapshotsChanged(leaseCtx, before, storedActor, "report_from_"+node)
 	return nil
 }
 

@@ -615,6 +615,9 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 	class = hardware.SandboxClass(bound.GetStatus())
 	outcome = ateattr.SchedulerOutcomeAssigned
 	logActorStateChanged(ctx, storedActor, ateattr.OperationResume)
+	if actor.GetStatus().GetAssignedNode() != storedActor.GetStatus().GetAssignedNode() {
+		logActorSnapshotsChanged(ctx, actor, storedActor, "assign_worker")
+	}
 	return storedActor, bound, nil
 }
 

@@ -16,6 +16,7 @@ package snapshottracker
 
 import (
 	"context"
+	"log/slog"
 
 	"go.ate.dev/substrate/internal/apierror"
 	"go.ate.dev/substrate/internal/proto/ateletpb"
@@ -31,6 +32,15 @@ func (t *Tracker) beginDetachLocked(ctx context.Context, a *actorSnapshots, back
 		return nil, err
 	}
 	opCtx, op := t.beginOpLocked(ctx, a, opDetach, target)
+	if background {
+		slog.InfoContext(opCtx, "Background detach started",
+			append(actorAttrs(a.actorUID, target.Actor),
+				slog.String("snapshot", target.uuid()),
+				slog.Int("generation", int(target.generation())),
+				slog.Bool("alreadyDurable", alreadyDurable),
+			)...,
+		)
+	}
 	return func() (*ateletpb.ActorSnapshotState, error) {
 		return t.finishDetach(opCtx, a.actorUID, op, alreadyDurable, background)
 	}, nil

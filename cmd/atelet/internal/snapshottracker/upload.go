@@ -40,6 +40,13 @@ func (t *Tracker) beginUploadLocked(ctx context.Context, a *actorSnapshots) func
 	if superseded != nil {
 		t.removeSupersededLocalCopyLocked(a.actorUID, *superseded)
 	}
+	slog.InfoContext(opCtx, "Background upload started",
+		append(actorAttrs(a.actorUID, target.Actor),
+			slog.String("snapshot", target.uuid()),
+			slog.Int("generation", int(target.generation())),
+			slog.Bool("resumed", wasUploading),
+		)...,
+	)
 	actorUID := a.actorUID
 	return func() {
 		t.backgroundUpload(opCtx, actorUID, op)
@@ -192,6 +199,8 @@ func (t *Tracker) removeSupersededLocalCopyLocked(actorUID string, target Snapsh
 		return
 	}
 	if err := removeLocalCheckpoint(t.ctx, actorUID, target.uuid()); err != nil {
-		slog.WarnContext(t.ctx, "Failed to delete a superseded local checkpoint", slog.String("actorUID", actorUID), slog.Any("err", err))
+		slog.WarnContext(t.ctx, "Failed to delete a superseded local checkpoint",
+			append(actorAttrs(actorUID, target.Actor), slog.Any("err", err))...,
+		)
 	}
 }

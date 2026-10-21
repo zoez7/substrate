@@ -206,6 +206,7 @@ func (w *ActorWorkflow) ensureMarkedSuspending(ctx context.Context, actorRef res
 		return nil, err
 	}
 	logActorStateChanged(ctx, storedActor, ateattr.OperationSuspend)
+	logActorSnapshotsChanged(ctx, actor, storedActor, "mark_suspending")
 	return storedActor, nil
 }
 
@@ -423,6 +424,7 @@ func (w *ActorWorkflow) ensureSuspendedFinalized(ctx context.Context, actorRef r
 		return nil, err
 	}
 	logActorStateChanged(ctx, storedActor, ateattr.OperationSuspend)
+	logActorSnapshotsChanged(ctx, latestActor, storedActor, "finalize_suspended")
 
 	// 3. Release the external snapshots this suspend replaced. Best-effort: the
 	// new snapshot is committed and the worker is gone, so failing the

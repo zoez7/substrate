@@ -92,14 +92,13 @@ func (k opKind) String() string {
 // warning, or at info level once ctx has ended, as when Terminate, an atelet
 // shutdown, or a newer durable snapshot cancels the operation.
 func logOp(ctx context.Context, actorUID string, kind opKind, target SnapshotRef, uploaded, background bool, elapsed time.Duration, err error) {
-	attrs := []any{
+	attrs := append(actorAttrs(actorUID, target.Actor),
 		slog.String("op", kind.String()),
-		slog.String("actorUID", actorUID),
 		slog.String("snapshot", target.uuid()),
 		slog.Int("generation", int(target.generation())),
 		slog.Bool("background", background),
 		slog.Duration("elapsed", elapsed),
-	}
+	)
 	switch {
 	case err == nil:
 		slog.InfoContext(ctx, "Snapshot operation finished", append(attrs, slog.Bool("uploaded", uploaded))...)
@@ -158,6 +157,13 @@ func (t *Tracker) Start() {
 				break
 			}
 			if a := t.findLocked(actorUID); a != nil {
+				slog.Info("Recovered snapshot state at startup",
+					append(actorAttrs(actorUID, a.actorRef()),
+						slog.Any("state", t.stateLocked(a)),
+						slog.Time("detachAt", a.DetachAt),
+						slog.Time("reportDueSince", a.ReportDueSince),
+					)...,
+				)
 				t.undurableActorsTally.observe(a)
 				t.enqueueSavedReportLocked(a)
 				t.requeueLocked(a)
@@ -397,7 +403,7 @@ func (t *Tracker) waitIdleLocked(ctx context.Context, actorUID string) (*actorSn
 		if a == nil || a.op == nil {
 			return a, nil
 		}
-		if err := t.waitOpLocked(ctx, actorUID, a.op); err != nil {
+		if err := t.waitOpLocked(ctx, actorUID, "detach", a.op); err != nil {
 			return nil, err
 		}
 	}
@@ -410,7 +416,7 @@ func (t *Tracker) waitIdleLocked(ctx context.Context, actorUID string) (*actorSn
 // is returned at once, without waiting further. Checkpoint, Run, and Restore
 // call this first so they never race with a detach pruning the actor's local
 // directory, without waiting behind an upload.
-func (t *Tracker) waitForDetachLocked(ctx context.Context, actorUID string, check func(*actorSnapshots) error) (*actorSnapshots, error) {
+func (t *Tracker) waitForDetachLocked(ctx context.Context, actorUID, caller string, check func(*actorSnapshots) error) (*actorSnapshots, error) {
 	for {
 		a := t.findLocked(actorUID)
 		if a != nil && check != nil {
@@ -421,7 +427,7 @@ func (t *Tracker) waitForDetachLocked(ctx context.Context, actorUID string, chec
 		if a == nil || a.runningDetach() == nil {
 			return a, nil
 		}
-		if err := t.waitOpLocked(ctx, actorUID, a.op); err != nil {
+		if err := t.waitOpLocked(ctx, actorUID, caller, a.op); err != nil {
 			return nil, err
 		}
 	}
@@ -454,7 +460,7 @@ func (t *Tracker) waitForDetachOrSnapshotUploadLocked(ctx context.Context, actor
 		default:
 			return a, nil
 		}
-		if err := t.waitOpLocked(ctx, actorUID, a.op); err != nil {
+		if err := t.waitOpLocked(ctx, actorUID, "promote", a.op); err != nil {
 			return nil, err
 		}
 	}
@@ -462,15 +468,31 @@ func (t *Tracker) waitForDetachOrSnapshotUploadLocked(ctx context.Context, actor
 
 // waitOpLocked waits, releasing the actor's lock meanwhile, until op has
 // ended or ctx does.
-func (t *Tracker) waitOpLocked(ctx context.Context, actorUID string, op *actorOp) error {
+func (t *Tracker) waitOpLocked(ctx context.Context, actorUID, caller string, op *actorOp) error {
+	waitStart := t.clock.Now()
 	t.unlock(actorUID)
 	defer t.lock(actorUID)
+	var err error
 	select {
 	case <-op.done:
-		return nil
 	case <-ctx.Done():
-		return ctx.Err()
+		err = ctx.Err()
 	}
+	msg := "Waiting for detach to finish"
+	if op.kind == opUpload {
+		msg = "Waiting for upload to finish"
+	}
+	slog.InfoContext(ctx, msg,
+		append(actorAttrs(actorUID, op.target.Actor),
+			slog.String("caller", caller),
+			slog.String("op", op.kind.String()),
+			slog.String("snapshot", op.target.uuid()),
+			slog.Int("generation", int(op.target.generation())),
+			slog.Duration("waited", t.clock.Since(waitStart)),
+			slog.Any("err", err),
+		)...,
+	)
+	return err
 }
 
 // backOffLocked records a failure of the actor's background work, and holds
@@ -478,6 +500,9 @@ func (t *Tracker) waitOpLocked(ctx context.Context, actorUID string, op *actorOp
 // failure.
 func (t *Tracker) backOffLocked(a *actorSnapshots) time.Time {
 	a.retryAt = t.clock.Now().Add(t.retries.When(a.actorUID))
+	slog.Info("Background work backed off",
+		append(actorAttrs(a.actorUID, a.actorRef()), slog.Time("retryAt", a.retryAt))...,
+	)
 	return a.retryAt
 }
 

@@ -125,6 +125,11 @@ func (t *Tracker) queueReportLocked(a *actorSnapshots) {
 		return
 	}
 	if a.hold != holdNone {
+		if !a.reportDeferred {
+			slog.Info("Report deferred while held",
+				append(actorAttrs(a.actorUID, a.actorRef()), slog.Int("hold", int(a.hold)))...,
+			)
+		}
 		a.reportDeferred = true
 		return
 	}
@@ -193,12 +198,12 @@ func (t *Tracker) report(actorUID string) time.Duration {
 	ctx, cancel := context.WithTimeout(t.ctx, reportTimeout)
 	err := t.reporting.reporter.ReportActorSnapshotState(ctx, actorUID, actor, sent)
 	cancel()
-	attrs := []any{
-		slog.String("actorUID", actorUID),
-		slog.Any("actor", actor),
+	attrs := append(actorAttrs(actorUID, actor),
 		slog.String("latestLocal", sent.GetLatestLocal().GetSnapshot().GetSnapshotUuid()),
 		slog.String("latestDurable", sent.GetLatestDurable().GetSnapshot().GetSnapshotUuid()),
-	}
+		slog.Any("state", sent),
+		slog.Time("dueSince", dueSince),
+	)
 	switch {
 	case err == nil:
 		slog.Info("Reported the actor's snapshot state", attrs...)
@@ -206,7 +211,9 @@ func (t *Tracker) report(actorUID string) time.Duration {
 		if t.ctx.Err() != nil {
 			// atelet is shutting down: leave the report due for the next
 			// atelet to send.
-			slog.Info("Failed to report the actor's snapshot state", append(attrs, slog.Any("err", err))...)
+			slog.Info("Failed to report the actor's snapshot state",
+				append(attrs, slog.String("code", status.Code(err).String()), slog.Any("err", err))...,
+			)
 			return 0
 		}
 		var queueDelay time.Duration
@@ -222,9 +229,13 @@ func (t *Tracker) report(actorUID string) time.Duration {
 		// NotFound is expected once the actor is deleted or a suspend has
 		// released it from this node; Unimplemented is expected during a
 		// rolling upgrade while ate-api-server is older than atelet.
-		slog.Info("The control plane refused the actor's snapshot state", append(attrs, slog.Any("err", err))...)
+		slog.Info("The control plane refused the actor's snapshot state",
+			append(attrs, slog.String("code", status.Code(err).String()), slog.Any("err", err))...,
+		)
 	default:
-		slog.Warn("The control plane refused the actor's snapshot state", append(attrs, slog.Any("err", err))...)
+		slog.Warn("The control plane refused the actor's snapshot state",
+			append(attrs, slog.String("code", status.Code(err).String()), slog.Any("err", err))...,
+		)
 	}
 	t.reporting.queueRetries.Forget("")
 	t.reporting.retries.Forget(actorUID)
@@ -259,6 +270,11 @@ func (t *Tracker) beginReport(actorUID string) (resources.ActorRef, *ateletpb.Ac
 		// A Run, Restore, Checkpoint, PromoteSnapshot, or Terminate of the
 		// actor is in progress, and queues the report when it ends (see
 		// holdLocked).
+		if !a.reportDeferred {
+			slog.Info("Report deferred while held",
+				append(actorAttrs(a.actorUID, a.actorRef()), slog.Int("hold", int(a.hold)))...,
+			)
+		}
 		a.reportDeferred = true
 		return resources.ActorRef{}, nil, time.Time{}, false
 	}
@@ -301,10 +317,18 @@ func (t *Tracker) retryReport(actorUID string, dueSince time.Time, attrs []any, 
 		return
 	}
 	now := t.clock.Now()
+	attempt := t.reporting.retries.NumRequeues(actorUID) + 1
 	if !now.Before(dueSince.Add(t.reporting.giveUpAfter)) {
 		t.clearReportDueLocked(a)
 		t.unlock(actorUID)
-		slog.Warn("Giving up on reporting the actor's snapshot state", append(attrs, slog.Duration("after", now.Sub(dueSince)), slog.Any("err", err))...)
+		slog.Warn("Giving up on reporting the actor's snapshot state",
+			append(attrs,
+				slog.Duration("after", now.Sub(dueSince)),
+				slog.Int("attempt", attempt),
+				slog.String("code", status.Code(err).String()),
+				slog.Any("err", err),
+			)...,
+		)
 		return
 	}
 	delay := t.reporting.retries.When(actorUID)
@@ -315,7 +339,14 @@ func (t *Tracker) retryReport(actorUID string, dueSince time.Time, attrs []any, 
 		// Another control-plane operation is changing the actor.
 		level = slog.LevelInfo
 	}
-	slog.Log(t.ctx, level, "Failed to report the actor's snapshot state", append(attrs, slog.Duration("retryAfter", delay), slog.Any("err", err))...)
+	slog.Log(t.ctx, level, "Failed to report the actor's snapshot state",
+		append(attrs,
+			slog.Int("attempt", attempt),
+			slog.Duration("retryAfter", delay),
+			slog.String("code", status.Code(err).String()),
+			slog.Any("err", err),
+		)...,
+	)
 	t.reporting.queue.AddAfter(actorUID, delay)
 }
 
