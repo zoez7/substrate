@@ -1160,7 +1160,7 @@ func (s *Atelet) cleanUpAfterCheckpoint(ctx context.Context, req *ateletpb.Check
 	// in-place path: that leaves the whole checkpoint window with no local snapshot
 	// while LocalSnapshotInfo still names the pruned one, and a crash there strands
 	// the actor for good (a paused actor has no uploaded copy for resume to fall
-	// back to, RequiredNodes pins it to this node, nothing clears the field).
+	// back to, its AssignedNode pins resume to this node, nothing clears the field).
 	//
 	// Best-effort: if this fails, the actor's next checkpoint or terminate
 	// prunes again.
