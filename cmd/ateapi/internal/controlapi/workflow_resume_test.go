@@ -1077,6 +1077,8 @@ type capturingAtelet struct {
 	checkpoints int
 	promotes    int
 
+	// onRestore, when set, runs before Restore returns. Its error fails the RPC.
+	onRestore func(ctx context.Context, req *ateletpb.RestoreRequest) error
 	// onCheckpoint, when set, runs before Checkpoint returns, standing in for
 	// whatever else happens while the workload checkpoints. Its error fails
 	// the RPC.
@@ -1101,8 +1103,14 @@ type capturingAtelet struct {
 
 func (f *capturingAtelet) Restore(ctx context.Context, req *ateletpb.RestoreRequest) (*ateletpb.RestoreResponse, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.restore = proto.Clone(req).(*ateletpb.RestoreRequest)
+	hook := f.onRestore
+	f.mu.Unlock()
+	if hook != nil {
+		if err := hook(ctx, req); err != nil {
+			return nil, err
+		}
+	}
 	return &ateletpb.RestoreResponse{}, nil
 }
 

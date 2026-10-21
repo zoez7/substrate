@@ -96,6 +96,9 @@ type fakeWorker struct {
 	// onTerminate, if non-nil, runs inside TerminateWorkload, which fails with
 	// the error it returns.
 	onTerminate func() error
+	// onCheckpointErr, if non-nil, runs at the start of CheckpointWorkload and
+	// fails the RPC when it returns a non-nil error.
+	onCheckpointErr func() error
 }
 
 func (f *fakeWorker) recordFidelity(rpc string, fidelity ateworkerpb.SnapshotFidelity) {
@@ -122,6 +125,11 @@ func (f *fakeWorker) RunWorkload(_ context.Context, req *ateworkerpb.RunWorkload
 }
 
 func (f *fakeWorker) CheckpointWorkload(_ context.Context, req *ateworkerpb.CheckpointWorkloadRequest) (*ateworkerpb.CheckpointWorkloadResponse, error) {
+	if f.onCheckpointErr != nil {
+		if err := f.onCheckpointErr(); err != nil {
+			return nil, err
+		}
+	}
 	f.recordActorDirs("CheckpointWorkload", req.GetActorDirs())
 	f.recordFidelity("CheckpointWorkload", req.GetFidelity())
 	dir := req.GetActorDirs().GetCheckpointDir()
