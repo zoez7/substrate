@@ -385,6 +385,14 @@ func TestValidateRunRequest(t *testing.T) {
 			r.SandboxRuntime.SandboxClass = "kata"
 		}),
 		want: field.ErrorList{field.NotSupported[string](field.NewPath("sandbox_runtime", "sandbox_class"), nil, nil)},
+	}, {
+		name: "sandbox_runtime rejects accepted_values",
+		obj: valid(func(r *ateletpb.RunRequest) {
+			r.SandboxRuntime.Version.Attributes[0].AcceptedValues = []*ateletpb.AcceptedValue{
+				{Value: "", Fidelity: ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY},
+			}
+		}),
+		want: field.ErrorList{field.Forbidden(field.NewPath("sandbox_runtime", "version", "attributes").Index(0).Child("accepted_values"), "")},
 	}}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1181,6 +1189,129 @@ func TestValidateSetWorkerSandboxRuntimesRequest(t *testing.T) {
 		name: "too many attributes",
 		obj:  withDefaultRuntime(compatWithAttributes(33)),
 		want: field.ErrorList{field.TooMany(defaultVersionPath.Child("attributes"), 33, 32).WithOrigin("maxItems")},
+	}, {
+		name: "valid accepted_values with empty bootstrap and prior value",
+		obj: withDefaultRuntime(&ateletpb.VersionedSandboxCompat{
+			SchemaVersion: "v1",
+			Attributes: []*ateletpb.AttributeEntry{{
+				Key:   "memory_compat",
+				Value: "v2",
+				AcceptedValues: []*ateletpb.AcceptedValue{
+					{Value: "", Fidelity: ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY},
+					{Value: "v1", Fidelity: ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS},
+				},
+			}},
+		}),
+	}, {
+		name: "nil accepted_values entry",
+		obj: withDefaultRuntime(&ateletpb.VersionedSandboxCompat{
+			SchemaVersion: "v1",
+			Attributes: []*ateletpb.AttributeEntry{{
+				Key:            "memory_compat",
+				Value:          "v2",
+				AcceptedValues: []*ateletpb.AcceptedValue{nil},
+			}},
+		}),
+		want: field.ErrorList{field.Required(defaultVersionPath.Child("attributes").Index(0).Child("accepted_values").Index(0), "")},
+	}, {
+		name: "accepted_values at the bound",
+		obj: withDefaultRuntime(func() *ateletpb.VersionedSandboxCompat {
+			avs := make([]*ateletpb.AcceptedValue, 16)
+			for i := range avs {
+				avs[i] = &ateletpb.AcceptedValue{Value: fmt.Sprintf("v-%d", i), Fidelity: ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY}
+			}
+			return &ateletpb.VersionedSandboxCompat{
+				SchemaVersion: "v1",
+				Attributes:    []*ateletpb.AttributeEntry{{Key: "memory_compat", Value: "v-current", AcceptedValues: avs}},
+			}
+		}()),
+	}, {
+		name: "too many accepted_values",
+		obj: withDefaultRuntime(func() *ateletpb.VersionedSandboxCompat {
+			avs := make([]*ateletpb.AcceptedValue, 17)
+			for i := range avs {
+				avs[i] = &ateletpb.AcceptedValue{Value: fmt.Sprintf("v-%d", i), Fidelity: ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY}
+			}
+			return &ateletpb.VersionedSandboxCompat{
+				SchemaVersion: "v1",
+				Attributes:    []*ateletpb.AttributeEntry{{Key: "memory_compat", Value: "v-current", AcceptedValues: avs}},
+			}
+		}()),
+		want: field.ErrorList{field.TooMany(defaultVersionPath.Child("attributes").Index(0).Child("accepted_values"), 17, 16).WithOrigin("maxItems")},
+	}, {
+		name: "accepted_values value too long",
+		obj: withDefaultRuntime(&ateletpb.VersionedSandboxCompat{
+			SchemaVersion: "v1",
+			Attributes: []*ateletpb.AttributeEntry{{
+				Key:   "memory_compat",
+				Value: "v2",
+				AcceptedValues: []*ateletpb.AcceptedValue{{
+					Value:    strings.Repeat("v", 257),
+					Fidelity: ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+				}},
+			}},
+		}),
+		want: field.ErrorList{field.TooLong(defaultVersionPath.Child("attributes").Index(0).Child("accepted_values").Index(0).Child("value"), "", 256).WithOrigin("maxLength")},
+	}, {
+		name: "accepted_values missing fidelity",
+		obj: withDefaultRuntime(&ateletpb.VersionedSandboxCompat{
+			SchemaVersion: "v1",
+			Attributes: []*ateletpb.AttributeEntry{{
+				Key:            "memory_compat",
+				Value:          "v2",
+				AcceptedValues: []*ateletpb.AcceptedValue{{Value: "v1"}},
+			}},
+		}),
+		want: field.ErrorList{field.Required(defaultVersionPath.Child("attributes").Index(0).Child("accepted_values").Index(0).Child("fidelity"), "")},
+	}, {
+		name: "accepted_values negative fidelity",
+		obj: withDefaultRuntime(&ateletpb.VersionedSandboxCompat{
+			SchemaVersion: "v1",
+			Attributes: []*ateletpb.AttributeEntry{{
+				Key:            "memory_compat",
+				Value:          "v2",
+				AcceptedValues: []*ateletpb.AcceptedValue{{Value: "v1", Fidelity: -1}},
+			}},
+		}),
+		want: field.ErrorList{field.Invalid(defaultVersionPath.Child("attributes").Index(0).Child("accepted_values").Index(0).Child("fidelity"), nil, "").WithOrigin("minimum")},
+	}, {
+		name: "accepted_values unknown fidelity",
+		obj: withDefaultRuntime(&ateletpb.VersionedSandboxCompat{
+			SchemaVersion: "v1",
+			Attributes: []*ateletpb.AttributeEntry{{
+				Key:            "memory_compat",
+				Value:          "v2",
+				AcceptedValues: []*ateletpb.AcceptedValue{{Value: "v1", Fidelity: 4}},
+			}},
+		}),
+		want: field.ErrorList{field.Invalid(defaultVersionPath.Child("attributes").Index(0).Child("accepted_values").Index(0).Child("fidelity"), nil, "").WithOrigin("maximum")},
+	}, {
+		name: "duplicate accepted_values value",
+		obj: withDefaultRuntime(&ateletpb.VersionedSandboxCompat{
+			SchemaVersion: "v1",
+			Attributes: []*ateletpb.AttributeEntry{{
+				Key:   "memory_compat",
+				Value: "v2",
+				AcceptedValues: []*ateletpb.AcceptedValue{
+					{Value: "v1", Fidelity: ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY},
+					{Value: "v1", Fidelity: ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS},
+				},
+			}},
+		}),
+		want: field.ErrorList{field.Duplicate(defaultVersionPath.Child("attributes").Index(0).Child("accepted_values").Index(1).Child("value"), "v1")},
+	}, {
+		name: "accepted_values value equals primary value",
+		obj: withDefaultRuntime(&ateletpb.VersionedSandboxCompat{
+			SchemaVersion: "v1",
+			Attributes: []*ateletpb.AttributeEntry{{
+				Key:   "memory_compat",
+				Value: "v2",
+				AcceptedValues: []*ateletpb.AcceptedValue{
+					{Value: "v2", Fidelity: ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY},
+				},
+			}},
+		}),
+		want: field.ErrorList{field.Invalid(defaultVersionPath.Child("attributes").Index(0).Child("accepted_values").Index(0).Child("value"), "v2", "")},
 	}, {
 		name: "nil restorable_runtimes entry",
 		obj:  withRestorable(nil),

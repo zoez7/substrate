@@ -92,6 +92,42 @@ func ValidateCustom_ActorSandboxRuntime_SandboxClass(_ context.Context, _ operat
 	return resources.ValidateSandboxClass(fldPath, *value)
 }
 
+// ValidateCustom_ActorSandboxRuntime_Version rejects accepted_values on
+// snapshot and assignment stamps, which record the single value the actor ran
+// under rather than a worker's compatibility table.
+func ValidateCustom_ActorSandboxRuntime_Version(_ context.Context, _ operation.Operation, fldPath *field.Path, value, _ *ateletpb.VersionedSandboxCompat) field.ErrorList {
+	var errs field.ErrorList
+	for i, a := range value.GetAttributes() {
+		if len(a.GetAcceptedValues()) > 0 {
+			errs = append(errs, field.Forbidden(fldPath.Child("attributes").Index(i).Child("accepted_values"), "accepted_values is only allowed on WorkerSandboxRuntime"))
+		}
+	}
+	return errs
+}
+
+// ValidateCustom_AttributeEntry enforces uniqueness of accepted_values.value
+// and rejects an accepted_values entry that repeats the attribute's primary
+// value.
+func ValidateCustom_AttributeEntry(_ context.Context, _ operation.Operation, fldPath *field.Path, value, _ *ateletpb.AttributeEntry) field.ErrorList {
+	var errs field.ErrorList
+	seen := make(map[string]struct{}, len(value.GetAcceptedValues()))
+	for i, av := range value.GetAcceptedValues() {
+		if av == nil {
+			continue
+		}
+		v := av.GetValue()
+		valPath := fldPath.Child("accepted_values").Index(i).Child("value")
+		if value.GetValue() != "" && v == value.GetValue() {
+			errs = append(errs, field.Invalid(valPath, v, "must not equal the attribute's primary value"))
+		}
+		if _, dup := seen[v]; dup {
+			errs = append(errs, field.Duplicate(valPath, v))
+		}
+		seen[v] = struct{}{}
+	}
+	return errs
+}
+
 func ValidateCustom_WorkerSandboxClass_SandboxClass(_ context.Context, _ operation.Operation, fldPath *field.Path, value, _ *string) field.ErrorList {
 	return resources.ValidateSandboxClass(fldPath, *value)
 }

@@ -237,12 +237,18 @@ func sameClasses(a, b []*ateapi.WorkerSandboxClass) bool {
 	return slices.EqualFunc(a, b, func(x, y *ateapi.WorkerSandboxClass) bool { return proto.Equal(x, y) })
 }
 
-// sortAttributes orders a runtime's compatibility attributes by key, in place.
-// Attribute order carries no meaning, but proto equality is order-sensitive, so
-// a report is canonicalized before it is compared with what is stored: the same
+// sortAttributes orders a runtime's compatibility attributes by key and each
+// attribute's accepted values by value, in place. Attribute and accepted-value
+// order carries no meaning, but proto equality is order-sensitive, so a report
+// is canonicalized before it is compared with what is stored: the same
 // attributes in another order are the same runtime and write nothing.
 func sortAttributes(compat *ateapi.VersionedSandboxCompat) {
 	slices.SortFunc(compat.GetAttributes(), func(a, b *ateapi.AttributeEntry) int {
 		return cmp.Compare(a.GetKey(), b.GetKey())
 	})
+	for _, a := range compat.GetAttributes() {
+		slices.SortFunc(a.GetAcceptedValues(), func(x, y *ateapi.AcceptedValue) int {
+			return cmp.Compare(x.GetValue(), y.GetValue())
+		})
+	}
 }

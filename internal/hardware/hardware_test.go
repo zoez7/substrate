@@ -530,3 +530,128 @@ func TestMaxFidelityAndWithMinFidelity(t *testing.T) {
 		})
 	}
 }
+
+func TestAcceptedValues(t *testing.T) {
+	bootstrapAccepted := []*ateapi.AcceptedValue{{
+		Value:    "",
+		Fidelity: ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+	}}
+	workerCompat := &ateapi.VersionedSandboxCompat{
+		SchemaVersion: SchemaVersionV1,
+		Attributes: []*ateapi.AttributeEntry{
+			{Key: AttrArchitecture, Value: "amd64"},
+			{
+				Key:   AttrSandboxBundleHash,
+				Value: "bundle-2",
+				AcceptedValues: []*ateapi.AcceptedValue{{
+					Value:    "bundle-1",
+					Fidelity: ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+				}},
+			},
+			{
+				Key:   AttrMemoryCompat,
+				Value: "mem-2",
+				AcceptedValues: []*ateapi.AcceptedValue{
+					{Value: "", Fidelity: ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY},
+					{Value: "mem-1", Fidelity: ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY},
+				},
+			},
+			{
+				Key:   AttrRootfsCompat,
+				Value: "rootfs-2",
+				AcceptedValues: []*ateapi.AcceptedValue{
+					{Value: "", Fidelity: ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY},
+					{Value: "rootfs-1", Fidelity: ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS},
+				},
+			},
+			{
+				Key:            AttrVolumesCompat,
+				Value:          "vol-1",
+				AcceptedValues: bootstrapAccepted,
+			},
+		},
+	}
+	status := &ateapi.WorkerStatus{SandboxClasses: []*ateapi.WorkerSandboxClass{{
+		SandboxClass:   "gvisor",
+		DefaultRuntime: &ateapi.WorkerSandboxRuntime{Version: workerCompat},
+	}}}
+
+	stamp := func(attrs ...*ateapi.AttributeEntry) *ateapi.ActorSandboxRuntime {
+		return &ateapi.ActorSandboxRuntime{
+			SandboxClass: "gvisor",
+			Version: &ateapi.VersionedSandboxCompat{
+				SchemaVersion: SchemaVersionV1,
+				Attributes:    attrs,
+			},
+		}
+	}
+	coldStamp := stamp(
+		&ateapi.AttributeEntry{Key: AttrArchitecture, Value: "amd64"},
+		&ateapi.AttributeEntry{Key: AttrSandboxBundleHash, Value: "bundle-2"},
+		&ateapi.AttributeEntry{Key: AttrMemoryCompat, Value: "mem-2"},
+		&ateapi.AttributeEntry{Key: AttrRootfsCompat, Value: "rootfs-2"},
+		&ateapi.AttributeEntry{Key: AttrVolumesCompat, Value: "vol-1"},
+	)
+
+	t.Run("ColdBootRuntime strips AcceptedValues", func(t *testing.T) {
+		got := ColdBootRuntime(status)
+		if !proto.Equal(got, coldStamp) {
+			t.Errorf("ColdBootRuntime() = %v, want %v", got, coldStamp)
+		}
+	})
+
+	t.Run("pre-bootstrap snapshot missing layer keys restores at MEMORY and stamps primary values", func(t *testing.T) {
+		preBootstrapSnap := stamp(
+			&ateapi.AttributeEntry{Key: AttrArchitecture, Value: "amd64"},
+			&ateapi.AttributeEntry{Key: AttrSandboxBundleHash, Value: "bundle-2"},
+		)
+		if got := MaxFidelity(status, preBootstrapSnap); got != ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY {
+			t.Errorf("MaxFidelity() = %v, want MEMORY", got)
+		}
+		if got := RuntimeFor(status, preBootstrapSnap); !proto.Equal(got, coldStamp) {
+			t.Errorf("RuntimeFor() = %v, want %v", got, coldStamp)
+		}
+	})
+
+	t.Run("prior memory_compat and bundle match at MEMORY and preserve prior memory_compat on stamp", func(t *testing.T) {
+		priorMemSnap := stamp(
+			&ateapi.AttributeEntry{Key: AttrArchitecture, Value: "amd64"},
+			&ateapi.AttributeEntry{Key: AttrSandboxBundleHash, Value: "bundle-1"},
+			&ateapi.AttributeEntry{Key: AttrMemoryCompat, Value: "mem-1"},
+			&ateapi.AttributeEntry{Key: AttrRootfsCompat, Value: "rootfs-2"},
+			&ateapi.AttributeEntry{Key: AttrVolumesCompat, Value: "vol-1"},
+		)
+		if got := MaxFidelity(status, priorMemSnap); got != ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY {
+			t.Errorf("MaxFidelity() = %v, want MEMORY", got)
+		}
+		wantStamp := stamp(
+			&ateapi.AttributeEntry{Key: AttrArchitecture, Value: "amd64"},
+			&ateapi.AttributeEntry{Key: AttrSandboxBundleHash, Value: "bundle-2"},
+			&ateapi.AttributeEntry{Key: AttrMemoryCompat, Value: "mem-1"},
+			&ateapi.AttributeEntry{Key: AttrRootfsCompat, Value: "rootfs-2"},
+			&ateapi.AttributeEntry{Key: AttrVolumesCompat, Value: "vol-1"},
+		)
+		if got := RuntimeFor(status, priorMemSnap); !proto.Equal(got, wantStamp) {
+			t.Errorf("RuntimeFor() = %v, want %v", got, wantStamp)
+		}
+	})
+
+	t.Run("accepted_values on rootfs_compat caps fidelity at ROOTFS instead of degrading to VOLUMES", func(t *testing.T) {
+		priorRootfsSnap := stamp(
+			&ateapi.AttributeEntry{Key: AttrArchitecture, Value: "amd64"},
+			&ateapi.AttributeEntry{Key: AttrSandboxBundleHash, Value: "bundle-2"},
+			&ateapi.AttributeEntry{Key: AttrMemoryCompat, Value: "mem-2"},
+			&ateapi.AttributeEntry{Key: AttrRootfsCompat, Value: "rootfs-1"},
+			&ateapi.AttributeEntry{Key: AttrVolumesCompat, Value: "vol-1"},
+		)
+		if got := MaxFidelity(status, priorRootfsSnap); got != ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS {
+			t.Errorf("MaxFidelity() = %v, want ROOTFS", got)
+		}
+		if got := MatchingRuntime(status, priorRootfsSnap); got != nil {
+			t.Errorf("MatchingRuntime() = %v, want nil when capped at ROOTFS", got)
+		}
+		if got := RuntimeFor(status, priorRootfsSnap); !proto.Equal(got, coldStamp) {
+			t.Errorf("RuntimeFor() = %v, want coldStamp %v", got, coldStamp)
+		}
+	})
+}

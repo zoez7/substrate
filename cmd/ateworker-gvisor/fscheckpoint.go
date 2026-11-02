@@ -55,10 +55,14 @@ func gvisorMemoryCompat() string {
 }
 
 func gvisorRuntimeAttributes() []*ateletpb.AttributeEntry {
+	bootstrap := []*ateletpb.AcceptedValue{{
+		Value:    "",
+		Fidelity: ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+	}}
 	return []*ateletpb.AttributeEntry{
-		{Key: hardware.AttrMemoryCompat, Value: gvisorMemoryCompat()},
-		{Key: hardware.AttrRootfsCompat, Value: gvisorRootfsCompat},
-		{Key: hardware.AttrVolumesCompat, Value: gvisorVolumesCompat},
+		{Key: hardware.AttrMemoryCompat, Value: gvisorMemoryCompat(), AcceptedValues: bootstrap},
+		{Key: hardware.AttrRootfsCompat, Value: gvisorRootfsCompat, AcceptedValues: bootstrap},
+		{Key: hardware.AttrVolumesCompat, Value: gvisorVolumesCompat, AcceptedValues: bootstrap},
 	}
 }
 

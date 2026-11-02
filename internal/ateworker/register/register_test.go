@@ -930,10 +930,11 @@ func TestReconcilerSyncReportsRuntimeAttributes(t *testing.T) {
 	if _, err := sandboxruntimes.Write(path, f); err != nil {
 		t.Fatal(err)
 	}
+	bootstrap := []*ateletpb.AcceptedValue{{Value: "", Fidelity: ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY}}
 	runtimeAttrs := []*ateletpb.AttributeEntry{
-		{Key: hardware.AttrVolumesCompat, Value: "v1"},
-		{Key: hardware.AttrMemoryCompat, Value: "sha256:mem"},
-		{Key: hardware.AttrRootfsCompat, Value: "v1"},
+		{Key: hardware.AttrVolumesCompat, Value: "v1", AcceptedValues: bootstrap},
+		{Key: hardware.AttrMemoryCompat, Value: "sha256:mem", AcceptedValues: bootstrap},
+		{Key: hardware.AttrRootfsCompat, Value: "v1", AcceptedValues: bootstrap},
 	}
 	var got *ateletpb.SetWorkerSandboxRuntimesRequest
 	r := newReconciler(
@@ -952,10 +953,10 @@ func TestReconcilerSyncReportsRuntimeAttributes(t *testing.T) {
 	wantFor := func(bundleHash string) []*ateletpb.AttributeEntry {
 		return []*ateletpb.AttributeEntry{
 			{Key: hardware.AttrArchitecture, Value: "amd64"},
-			{Key: hardware.AttrMemoryCompat, Value: "sha256:mem"},
-			{Key: hardware.AttrRootfsCompat, Value: "v1"},
+			{Key: hardware.AttrMemoryCompat, Value: "sha256:mem", AcceptedValues: bootstrap},
+			{Key: hardware.AttrRootfsCompat, Value: "v1", AcceptedValues: bootstrap},
 			{Key: hardware.AttrSandboxBundleHash, Value: bundleHash},
-			{Key: hardware.AttrVolumesCompat, Value: "v1"},
+			{Key: hardware.AttrVolumesCompat, Value: "v1", AcceptedValues: bootstrap},
 		}
 	}
 	if diff := cmp.Diff(wantFor("sha256:v2"), c.GetDefaultRuntime().GetVersion().GetAttributes(), protocmp.Transform()); diff != "" {

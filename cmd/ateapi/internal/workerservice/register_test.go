@@ -545,10 +545,17 @@ func TestSetWorkerSandboxRuntimes_SortsAttributes(t *testing.T) {
 	seedReportedWorker(t, st, testNode, &ateapi.WorkerResources{Actors: 1})
 	authed := ateletauthtest.ContextWith(ateletauthtest.CertOn(t, testNode))
 
-	compatWith := func(keys ...string) *ateapi.VersionedSandboxCompat {
+	compatWith := func(accepted []string, keys ...string) *ateapi.VersionedSandboxCompat {
 		c := &ateapi.VersionedSandboxCompat{SchemaVersion: "v1"}
 		for _, k := range keys {
-			c.Attributes = append(c.Attributes, &ateapi.AttributeEntry{Key: k, Value: "v"})
+			entry := &ateapi.AttributeEntry{Key: k, Value: "v"}
+			for _, av := range accepted {
+				entry.AcceptedValues = append(entry.AcceptedValues, &ateapi.AcceptedValue{
+					Value:    av,
+					Fidelity: ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+				})
+			}
+			c.Attributes = append(c.Attributes, entry)
 		}
 		return c
 	}
@@ -563,13 +570,13 @@ func TestSetWorkerSandboxRuntimes_SortsAttributes(t *testing.T) {
 		return got.GetWorker()
 	}
 
-	first := report(compatWith("cpu_features", "architecture"), compatWith("sandbox_bundle_hash", "architecture"))
-	want := []*ateapi.WorkerSandboxClass{testClass("gvisor", compatWith("architecture", "cpu_features"), compatWith("architecture", "sandbox_bundle_hash"))}
+	first := report(compatWith([]string{"v2", ""}, "cpu_features", "architecture"), compatWith([]string{"v2", "v1"}, "sandbox_bundle_hash", "architecture"))
+	want := []*ateapi.WorkerSandboxClass{testClass("gvisor", compatWith([]string{"", "v2"}, "architecture", "cpu_features"), compatWith([]string{"v1", "v2"}, "architecture", "sandbox_bundle_hash"))}
 	if diff := cmp.Diff(want, first.GetStatus().GetSandboxClasses(), protocmp.Transform()); diff != "" {
-		t.Errorf("sandbox_classes not stored sorted by key (-want +got):\n%s", diff)
+		t.Errorf("sandbox_classes not stored sorted by key and accepted_values (-want +got):\n%s", diff)
 	}
 
-	again := report(compatWith("architecture", "cpu_features"), compatWith("architecture", "sandbox_bundle_hash"))
+	again := report(compatWith([]string{"", "v2"}, "architecture", "cpu_features"), compatWith([]string{"v1", "v2"}, "architecture", "sandbox_bundle_hash"))
 	if got, want := again.GetMetadata().GetVersion(), first.GetMetadata().GetVersion(); got != want {
 		t.Errorf("version = %d after a reordered repeat, want %d unchanged", got, want)
 	}

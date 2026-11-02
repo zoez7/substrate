@@ -2465,9 +2465,6 @@ message WorkerSandboxRuntime {
   // is taken on this runtime. Snapshots matching it can warm-boot on this
   // runtime.
   //
-  // (-- TODO: Add the additional compatibility versions this runtime can also
-  // restore snapshots from. --)
-  //
   // +k8s:required
   VersionedSandboxCompat version = 1;
 
@@ -2519,6 +2516,7 @@ message ActorSandboxRuntime {
   // warm-boot on a worker whose runtime of this class matches it.
   //
   // +k8s:required
+  // +k8s:customValidation # no accepted_values on snapshot or assignment stamps
   VersionedSandboxCompat version = 2;
 
   // (-- TODO: Add an informational SandboxConfig version name (e.g. "gvisor-2")
@@ -2536,15 +2534,12 @@ message VersionedSandboxCompat {
   string schema_version = 1;
 
   // Key-value compatibility attributes defined by this schema version, covering
-  // both runtime assets (e.g. "sandbox_bundle_hash") and effective guest
-  // hardware features after masking (e.g. "architecture", "cpu_features").
-  // Matched against a snapshot under the same schema_version: every attribute
-  // on the snapshot must be present on the worker with an equal value (except
-  // "cpu_features", where the snapshot's hexadecimal bitmask must be a bitwise
-  // subset of the worker's); keys only the worker has are ignored, so a worker
-  // can gain keys under one schema_version without invalidating older
-  // snapshots. Removing or recomputing a key is a new schema_version, under
-  // which older snapshots no longer match.
+  // runtime assets (e.g. "sandbox_bundle_hash"), effective guest hardware
+  // features after masking (e.g. "architecture", "cpu_features"), and
+  // worker-owned layer contracts (e.g. "memory_compat", "rootfs_compat",
+  // "volumes_compat"). Matched against a snapshot under the same
+  // schema_version: each mismatched or missing attribute caps the restore
+  // fidelity according to its layer or its matching accepted_values entry.
   // Order as sent does not matter: ate-api-server sorts attributes by key
   // before recording them.
   //
@@ -2556,6 +2551,8 @@ message VersionedSandboxCompat {
 }
 
 // AttributeEntry is a single key-value compatibility attribute.
+//
+// +k8s:customValidation # accepted_values have distinct values and do not repeat value
 message AttributeEntry {
   // Attribute name (e.g. "architecture", "cpu_features", "sandbox_bundle_hash").
   //
@@ -2568,6 +2565,35 @@ message AttributeEntry {
   // +k8s:required
   // +k8s:maxLength=256
   string value = 2;
+
+  // Additional snapshot values for key that a worker also accepts when
+  // restoring, along with the maximum SnapshotFidelity each value supports.
+  // Only valid on WorkerSandboxRuntime; forbidden on ActorSandboxRuntime.
+  //
+  // +k8s:optional
+  // +k8s:maxItems=16
+  // +k8s:listType=atomic
+  repeated AcceptedValue accepted_values = 3;
+}
+
+// AcceptedValue is a prior or bootstrap attribute value that a worker runtime
+// still accepts when restoring a snapshot, paired with the highest
+// SnapshotFidelity it supports.
+message AcceptedValue {
+  // Snapshot value for the enclosing attribute key. Empty string matches a
+  // snapshot that does not carry the key at all.
+  //
+  // +k8s:optional
+  // +k8s:maxLength=256
+  string value = 1;
+
+  // Highest SnapshotFidelity a worker can restore at when the snapshot's
+  // attribute matches value.
+  //
+  // +k8s:required
+  // +k8s:minimum=1
+  // +k8s:maximum=3 # keep this in sync with the SnapshotFidelity enum
+  SnapshotFidelity fidelity = 2;
 }
 
 // WorkerResources represents a set of resources.

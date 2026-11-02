@@ -29,6 +29,81 @@ import (
 	field "k8s.io/apimachinery/pkg/util/validation/field"
 )
 
+// Validate_AcceptedValue validates an instance of AcceptedValue according
+// to declarative validation rules in the API schema.
+func Validate_AcceptedValue(
+	ctx context.Context, op operation.Operation, fldPath *field.Path,
+	obj, oldObj *ateletpb.AcceptedValue) (errs field.ErrorList) {
+
+	{ // field ateletpb.AcceptedValue.Value
+		fn := func(
+			fldPath *field.Path,
+			obj, oldObj *string,
+			oldValueCorrelated bool) (errs field.ErrorList) {
+			// don't revalidate unchanged data
+			if oldValueCorrelated && op.Type == operation.Update {
+				if obj == oldObj || (obj != nil && oldObj != nil && *obj == *oldObj) {
+					return nil
+				}
+			}
+			// call field-attached validations
+			earlyReturn := false
+			if e := validate.OptionalValue(ctx, op, fldPath, obj, oldObj).MarkShortCircuit(); len(e) != 0 {
+				earlyReturn = true
+			}
+			if earlyReturn {
+				return // do not proceed
+			}
+			if e := validate.MaxLength(ctx, op, fldPath, obj, oldObj, 256); len(e) != 0 {
+				errs = append(errs, e...)
+			}
+			return
+		}
+		oldVal := safe.Field(oldObj,
+			func(oldObj *ateletpb.AcceptedValue) *string {
+				return &oldObj.Value
+			})
+		errs = append(errs, fn(fldPath.Child("value"), &obj.Value, oldVal, oldObj != nil)...)
+	}
+
+	{ // field ateletpb.AcceptedValue.Fidelity
+		fn := func(
+			fldPath *field.Path,
+			obj, oldObj *ateletpb.SnapshotFidelity,
+			oldValueCorrelated bool) (errs field.ErrorList) {
+			// don't revalidate unchanged data
+			if oldValueCorrelated && op.Type == operation.Update {
+				if obj == oldObj || (obj != nil && oldObj != nil && *obj == *oldObj) {
+					return nil
+				}
+			}
+			// call field-attached validations
+			earlyReturn := false
+			if e := validate.RequiredValue(ctx, op, fldPath, obj, oldObj).MarkShortCircuit(); len(e) != 0 {
+				errs = append(errs, e...)
+				earlyReturn = true
+			}
+			if earlyReturn {
+				return // do not proceed
+			}
+			if e := validate.Maximum(ctx, op, fldPath, obj, oldObj, 3); len(e) != 0 {
+				errs = append(errs, e...)
+			}
+			if e := validate.Minimum(ctx, op, fldPath, obj, oldObj, 1); len(e) != 0 {
+				errs = append(errs, e...)
+			}
+			return
+		}
+		oldVal := safe.Field(oldObj,
+			func(oldObj *ateletpb.AcceptedValue) *ateletpb.SnapshotFidelity {
+				return &oldObj.Fidelity
+			})
+		errs = append(errs, fn(fldPath.Child("fidelity"), &obj.Fidelity, oldVal, oldObj != nil)...)
+	}
+
+	return errs
+}
+
 // Validate_ActorMetadataDataSource validates an instance of ActorMetadataDataSource according
 // to declarative validation rules in the API schema.
 func Validate_ActorMetadataDataSource(
@@ -233,6 +308,10 @@ func Validate_ActorSandboxRuntime(
 			if earlyReturn {
 				return // do not proceed
 			}
+			// custom validation
+			if e := ValidateCustom_ActorSandboxRuntime_Version(ctx, op, fldPath, obj, oldObj); len(e) != 0 {
+				errs = append(errs, e...)
+			}
 			// call the type's validation function
 			errs = append(errs, Validate_VersionedSandboxCompat(ctx, op, fldPath, obj, oldObj)...)
 			return
@@ -252,6 +331,11 @@ func Validate_ActorSandboxRuntime(
 func Validate_AttributeEntry(
 	ctx context.Context, op operation.Operation, fldPath *field.Path,
 	obj, oldObj *ateletpb.AttributeEntry) (errs field.ErrorList) {
+
+	// custom validation
+	if e := ValidateCustom_AttributeEntry(ctx, op, fldPath, obj, oldObj); len(e) != 0 {
+		errs = append(errs, e...)
+	}
 
 	{ // field ateletpb.AttributeEntry.Key
 		fn := func(
@@ -315,6 +399,46 @@ func Validate_AttributeEntry(
 				return &oldObj.Value
 			})
 		errs = append(errs, fn(fldPath.Child("value"), &obj.Value, oldVal, oldObj != nil)...)
+	}
+
+	{ // field ateletpb.AttributeEntry.AcceptedValues
+		fn := func(
+			fldPath *field.Path,
+			obj, oldObj []*ateletpb.AcceptedValue,
+			oldValueCorrelated bool) (errs field.ErrorList) {
+			// don't revalidate unchanged data
+			if oldValueCorrelated && op.Type == operation.Update {
+				if ateDeepEqual(obj, oldObj) {
+					return nil
+				}
+			}
+			// call field-attached validations
+			earlyReturn := false
+			if e := validate.PtrSliceNoNils[ateletpb.AcceptedValue](ctx, op, fldPath, obj, oldObj).MarkShortCircuit(); len(e) != 0 {
+				errs = append(errs, e...)
+				earlyReturn = true
+			}
+			if e := validate.MaxItems(ctx, op, fldPath, obj, oldObj, 16).MarkShortCircuit(); len(e) != 0 {
+				errs = append(errs, e...)
+				earlyReturn = true
+			}
+			if e := validate.OptionalSlice(ctx, op, fldPath, obj, oldObj).MarkShortCircuit(); len(e) != 0 {
+				earlyReturn = true
+			}
+			if earlyReturn {
+				return // do not proceed
+			}
+			// iterate the list and call the type's validation function
+			if e := validate.EachPtrSliceVal(ctx, op, fldPath, obj, oldObj, nil, nil, Validate_AcceptedValue); len(e) != 0 {
+				errs = append(errs, e...)
+			}
+			return
+		}
+		oldVal := safe.Field(oldObj,
+			func(oldObj *ateletpb.AttributeEntry) []*ateletpb.AcceptedValue {
+				return oldObj.AcceptedValues
+			})
+		errs = append(errs, fn(fldPath.Child("accepted_values"), obj.AcceptedValues, oldVal, oldObj != nil)...)
 	}
 
 	return errs

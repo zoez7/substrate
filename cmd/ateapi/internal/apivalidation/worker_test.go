@@ -614,6 +614,123 @@ func TestValidateSetWorkerSandboxRuntimesRequest(t *testing.T) {
 		}),
 		want: field.ErrorList{field.TooMany(defaultVersionPath.Child("attributes"), 33, 32).WithOrigin("maxItems")},
 	}, {
+		name: "valid accepted_values with empty bootstrap and prior value",
+		req: valid(func(r *ateapi.SetWorkerSandboxRuntimesRequest) {
+			r.SandboxClasses[0].DefaultRuntime.Version.Attributes = []*ateapi.AttributeEntry{{
+				Key:   "memory_compat",
+				Value: "v2",
+				AcceptedValues: []*ateapi.AcceptedValue{
+					{Value: "", Fidelity: ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY},
+					{Value: "v1", Fidelity: ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS},
+				},
+			}}
+		}),
+	}, {
+		name: "nil accepted_values entry",
+		req: valid(func(r *ateapi.SetWorkerSandboxRuntimesRequest) {
+			r.SandboxClasses[0].DefaultRuntime.Version.Attributes = []*ateapi.AttributeEntry{{
+				Key:            "memory_compat",
+				Value:          "v2",
+				AcceptedValues: []*ateapi.AcceptedValue{nil},
+			}}
+		}),
+		want: field.ErrorList{field.Required(defaultVersionPath.Child("attributes").Index(0).Child("accepted_values").Index(0), "")},
+	}, {
+		name: "accepted_values at the bound",
+		req: valid(func(r *ateapi.SetWorkerSandboxRuntimesRequest) {
+			avs := make([]*ateapi.AcceptedValue, 16)
+			for i := range avs {
+				avs[i] = &ateapi.AcceptedValue{Value: fmt.Sprintf("v-%d", i), Fidelity: ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY}
+			}
+			r.SandboxClasses[0].DefaultRuntime.Version.Attributes = []*ateapi.AttributeEntry{{
+				Key:            "memory_compat",
+				Value:          "v-current",
+				AcceptedValues: avs,
+			}}
+		}),
+	}, {
+		name: "too many accepted_values",
+		req: valid(func(r *ateapi.SetWorkerSandboxRuntimesRequest) {
+			avs := make([]*ateapi.AcceptedValue, 17)
+			for i := range avs {
+				avs[i] = &ateapi.AcceptedValue{Value: fmt.Sprintf("v-%d", i), Fidelity: ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY}
+			}
+			r.SandboxClasses[0].DefaultRuntime.Version.Attributes = []*ateapi.AttributeEntry{{
+				Key:            "memory_compat",
+				Value:          "v-current",
+				AcceptedValues: avs,
+			}}
+		}),
+		want: field.ErrorList{field.TooMany(defaultVersionPath.Child("attributes").Index(0).Child("accepted_values"), 17, 16).WithOrigin("maxItems")},
+	}, {
+		name: "accepted_values value too long",
+		req: valid(func(r *ateapi.SetWorkerSandboxRuntimesRequest) {
+			r.SandboxClasses[0].DefaultRuntime.Version.Attributes = []*ateapi.AttributeEntry{{
+				Key:   "memory_compat",
+				Value: "v2",
+				AcceptedValues: []*ateapi.AcceptedValue{{
+					Value:    strings.Repeat("v", 257),
+					Fidelity: ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+				}},
+			}}
+		}),
+		want: field.ErrorList{field.TooLong(defaultVersionPath.Child("attributes").Index(0).Child("accepted_values").Index(0).Child("value"), "", 256).WithOrigin("maxLength")},
+	}, {
+		name: "accepted_values missing fidelity",
+		req: valid(func(r *ateapi.SetWorkerSandboxRuntimesRequest) {
+			r.SandboxClasses[0].DefaultRuntime.Version.Attributes = []*ateapi.AttributeEntry{{
+				Key:            "memory_compat",
+				Value:          "v2",
+				AcceptedValues: []*ateapi.AcceptedValue{{Value: "v1"}},
+			}}
+		}),
+		want: field.ErrorList{field.Required(defaultVersionPath.Child("attributes").Index(0).Child("accepted_values").Index(0).Child("fidelity"), "")},
+	}, {
+		name: "accepted_values negative fidelity",
+		req: valid(func(r *ateapi.SetWorkerSandboxRuntimesRequest) {
+			r.SandboxClasses[0].DefaultRuntime.Version.Attributes = []*ateapi.AttributeEntry{{
+				Key:            "memory_compat",
+				Value:          "v2",
+				AcceptedValues: []*ateapi.AcceptedValue{{Value: "v1", Fidelity: -1}},
+			}}
+		}),
+		want: field.ErrorList{field.Invalid(defaultVersionPath.Child("attributes").Index(0).Child("accepted_values").Index(0).Child("fidelity"), nil, "").WithOrigin("minimum")},
+	}, {
+		name: "accepted_values unknown fidelity",
+		req: valid(func(r *ateapi.SetWorkerSandboxRuntimesRequest) {
+			r.SandboxClasses[0].DefaultRuntime.Version.Attributes = []*ateapi.AttributeEntry{{
+				Key:            "memory_compat",
+				Value:          "v2",
+				AcceptedValues: []*ateapi.AcceptedValue{{Value: "v1", Fidelity: 4}},
+			}}
+		}),
+		want: field.ErrorList{field.Invalid(defaultVersionPath.Child("attributes").Index(0).Child("accepted_values").Index(0).Child("fidelity"), nil, "").WithOrigin("maximum")},
+	}, {
+		name: "duplicate accepted_values value",
+		req: valid(func(r *ateapi.SetWorkerSandboxRuntimesRequest) {
+			r.SandboxClasses[0].DefaultRuntime.Version.Attributes = []*ateapi.AttributeEntry{{
+				Key:   "memory_compat",
+				Value: "v2",
+				AcceptedValues: []*ateapi.AcceptedValue{
+					{Value: "v1", Fidelity: ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY},
+					{Value: "v1", Fidelity: ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS},
+				},
+			}}
+		}),
+		want: field.ErrorList{field.Duplicate(defaultVersionPath.Child("attributes").Index(0).Child("accepted_values").Index(1).Child("value"), "v1")},
+	}, {
+		name: "accepted_values value equals primary value",
+		req: valid(func(r *ateapi.SetWorkerSandboxRuntimesRequest) {
+			r.SandboxClasses[0].DefaultRuntime.Version.Attributes = []*ateapi.AttributeEntry{{
+				Key:   "memory_compat",
+				Value: "v2",
+				AcceptedValues: []*ateapi.AcceptedValue{
+					{Value: "v2", Fidelity: ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY},
+				},
+			}}
+		}),
+		want: field.ErrorList{field.Invalid(defaultVersionPath.Child("attributes").Index(0).Child("accepted_values").Index(0).Child("value"), "v2", "")},
+	}, {
 		name: "nil restorable_runtimes entry",
 		req: valid(func(r *ateapi.SetWorkerSandboxRuntimesRequest) {
 			r.SandboxClasses[0].RestorableRuntimes = []*ateapi.WorkerSandboxRuntime{nil}

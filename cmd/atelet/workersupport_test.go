@@ -345,6 +345,43 @@ func TestSetWorkerSandboxRuntimes(t *testing.T) {
 		req:           &ateletpb.SetWorkerSandboxRuntimesRequest{Epoch: 3, SandboxClasses: reqClasses(reqCompat("d547"))},
 		wantForwarded: forwarded(wantCompat("d547")),
 	}, {
+		name: "forwards attribute accepted_values",
+		req: &ateletpb.SetWorkerSandboxRuntimesRequest{
+			Epoch: 3,
+			SandboxClasses: []*ateletpb.WorkerSandboxClass{{
+				SandboxClass: "gvisor",
+				DefaultRuntime: &ateletpb.WorkerSandboxRuntime{Version: &ateletpb.VersionedSandboxCompat{
+					SchemaVersion: "v1",
+					Attributes: []*ateletpb.AttributeEntry{{
+						Key:   "memory_compat",
+						Value: "v2",
+						AcceptedValues: []*ateletpb.AcceptedValue{
+							{Value: "", Fidelity: ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY},
+							{Value: "v1", Fidelity: ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS},
+						},
+					}},
+				}},
+			}},
+		},
+		wantForwarded: []*ateapi.SetWorkerSandboxRuntimesRequest{{
+			Worker: &ateapi.ObjectRef{Name: "pod-a"},
+			Epoch:  3,
+			SandboxClasses: []*ateapi.WorkerSandboxClass{{
+				SandboxClass: "gvisor",
+				DefaultRuntime: &ateapi.WorkerSandboxRuntime{Version: &ateapi.VersionedSandboxCompat{
+					SchemaVersion: "v1",
+					Attributes: []*ateapi.AttributeEntry{{
+						Key:   "memory_compat",
+						Value: "v2",
+						AcceptedValues: []*ateapi.AcceptedValue{
+							{Value: "", Fidelity: ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY},
+							{Value: "v1", Fidelity: ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS},
+						},
+					}},
+				}},
+			}},
+		}},
+	}, {
 		name:     "rejects missing sandbox classes without forwarding",
 		req:      &ateletpb.SetWorkerSandboxRuntimesRequest{Epoch: 3},
 		wantCode: codes.InvalidArgument,

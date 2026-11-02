@@ -201,7 +201,18 @@ func (r Requirement) maxCompatFidelity(worker *ateapi.VersionedSandboxCompat) at
 			}
 		}
 		if sa == nil || !r.attributeSatisfied(wa.GetKey(), wa.GetValue(), sa.GetValue()) {
-			best = min(best, attributeMismatchFidelity(wa.GetKey()))
+			snapVal := sa.GetValue()
+			matchedAccepted := false
+			for _, av := range wa.GetAcceptedValues() {
+				if r.attributeSatisfied(wa.GetKey(), av.GetValue(), snapVal) {
+					best = min(best, av.GetFidelity())
+					matchedAccepted = true
+					break
+				}
+			}
+			if !matchedAccepted {
+				best = min(best, attributeMismatchFidelity(wa.GetKey()))
+			}
 			if best == ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_UNSPECIFIED {
 				return best
 			}
@@ -285,9 +296,24 @@ func classOf(status *ateapi.WorkerStatus, class string) *ateapi.WorkerSandboxCla
 }
 
 // runtimeOf is the ActorSandboxRuntime an assignment or snapshot is stamped with
-// for compat under class.
+// for compat under class. It strips AcceptedValues because stamps record the
+// single attribute values the actor ran under rather than a worker's
+// compatibility table.
 func runtimeOf(class string, compat *ateapi.VersionedSandboxCompat) *ateapi.ActorSandboxRuntime {
-	return &ateapi.ActorSandboxRuntime{SandboxClass: class, Version: compat}
+	if compat == nil {
+		return &ateapi.ActorSandboxRuntime{SandboxClass: class}
+	}
+	attrs := make([]*ateapi.AttributeEntry, len(compat.GetAttributes()))
+	for i, a := range compat.GetAttributes() {
+		attrs[i] = &ateapi.AttributeEntry{Key: a.GetKey(), Value: a.GetValue()}
+	}
+	return &ateapi.ActorSandboxRuntime{
+		SandboxClass: class,
+		Version: &ateapi.VersionedSandboxCompat{
+			SchemaVersion: compat.GetSchemaVersion(),
+			Attributes:    attrs,
+		},
+	}
 }
 
 // matchingRuntime returns the runtime from status that can restore the
@@ -313,16 +339,37 @@ func (r Requirement) matchingRuntime(status *ateapi.WorkerStatus) *ateapi.Worker
 
 // MatchingRuntime returns the runtime from status that can restore the
 // snapshot, as a stamp: the snapshot's class with the version of the runtime
-// matchingRuntime finds, or nil when it finds none. A requirement of nothing
+// matchingRuntime finds, or nil when it finds none. When a memory restore
+// matches AttrMemoryCompat through accepted_values, a non-empty snapshot
+// AttrMemoryCompat value is preserved on the stamp because the restored
+// sandbox retains the guest shape it booted with. A requirement of nothing
 // returns ColdBootRuntime.
 func (r Requirement) MatchingRuntime(status *ateapi.WorkerStatus) *ateapi.ActorSandboxRuntime {
 	if r.snap == nil {
 		return ColdBootRuntime(status)
 	}
 	if rt := r.matchingRuntime(status); rt != nil {
-		return runtimeOf(r.snap.GetSandboxClass(), rt.GetVersion())
+		stamped := runtimeOf(r.snap.GetSandboxClass(), rt.GetVersion())
+		if snapMem := r.snapshotAttrValue(AttrMemoryCompat); snapMem != "" {
+			for _, a := range stamped.GetVersion().GetAttributes() {
+				if a.GetKey() == AttrMemoryCompat {
+					a.Value = snapMem
+					break
+				}
+			}
+		}
+		return stamped
 	}
 	return nil
+}
+
+func (r Requirement) snapshotAttrValue(key string) string {
+	for _, a := range r.compat.GetAttributes() {
+		if a.GetKey() == key {
+			return a.GetValue()
+		}
+	}
+	return ""
 }
 
 // WorkerMatches reports whether a worker with status can restore the

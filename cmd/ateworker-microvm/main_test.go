@@ -26,6 +26,7 @@ import (
 	"go.ate.dev/substrate/internal/apierror"
 	"go.ate.dev/substrate/internal/hardware"
 	"go.ate.dev/substrate/internal/nodepath"
+	"go.ate.dev/substrate/internal/proto/ateletpb"
 	"go.ate.dev/substrate/internal/proto/ateworkerpb"
 )
 
@@ -115,17 +116,20 @@ func validRestoreRequest() *ateworkerpb.RestoreWorkloadRequest {
 
 func TestMicroVMRuntimeAttributes(t *testing.T) {
 	attrs := microvmRuntimeAttributes()
-	byKey := make(map[string]string, len(attrs))
+	byKey := make(map[string]*ateletpb.AttributeEntry, len(attrs))
 	for _, a := range attrs {
-		byKey[a.GetKey()] = a.GetValue()
+		byKey[a.GetKey()] = a
+		if got := a.GetAcceptedValues(); len(got) != 1 || got[0].GetValue() != "" || got[0].GetFidelity() != ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY {
+			t.Errorf("%s accepted_values = %v, want [{value: \"\", fidelity: MEMORY}]", a.GetKey(), got)
+		}
 	}
-	if got := byKey[hardware.AttrMemoryCompat]; !strings.HasPrefix(got, "sha256:") || len(got) != len("sha256:")+64 {
+	if got := byKey[hardware.AttrMemoryCompat].GetValue(); !strings.HasPrefix(got, "sha256:") || len(got) != len("sha256:")+64 {
 		t.Errorf("memory_compat = %q, want sha256:<64 hex chars>", got)
 	}
-	if got := byKey[hardware.AttrRootfsCompat]; got != "v1" {
+	if got := byKey[hardware.AttrRootfsCompat].GetValue(); got != "v1" {
 		t.Errorf("rootfs_compat = %q, want v1", got)
 	}
-	if got := byKey[hardware.AttrVolumesCompat]; got != "v1" {
+	if got := byKey[hardware.AttrVolumesCompat].GetValue(); got != "v1" {
 		t.Errorf("volumes_compat = %q, want v1", got)
 	}
 }

@@ -55,10 +55,14 @@ func microvmMemoryCompat() string {
 }
 
 func microvmRuntimeAttributes() []*ateletpb.AttributeEntry {
+	bootstrap := []*ateletpb.AcceptedValue{{
+		Value:    "",
+		Fidelity: ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+	}}
 	return []*ateletpb.AttributeEntry{
-		{Key: hardware.AttrMemoryCompat, Value: microvmMemoryCompat()},
-		{Key: hardware.AttrRootfsCompat, Value: microvmRootfsCompat},
-		{Key: hardware.AttrVolumesCompat, Value: microvmVolumesCompat},
+		{Key: hardware.AttrMemoryCompat, Value: microvmMemoryCompat(), AcceptedValues: bootstrap},
+		{Key: hardware.AttrRootfsCompat, Value: microvmRootfsCompat, AcceptedValues: bootstrap},
+		{Key: hardware.AttrVolumesCompat, Value: microvmVolumesCompat, AcceptedValues: bootstrap},
 	}
 }
 

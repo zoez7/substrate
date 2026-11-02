@@ -391,6 +391,25 @@ func TestValidateActorUpdate(t *testing.T) {
 			field.NotSupported[string](field.NewPath("status", "worker_assignment", "sandbox_runtime", "sandbox_class"), nil, nil),
 		},
 	}, {
+		name:   "forbidden actor.status.worker_assignment.sandbox_runtime accepted_values",
+		oldVal: validInput(withStatus()),
+		newVal: validOutput(withStatus(withWorkerAssignment(func(wa *ateapi.WorkerAssignment) {
+			wa.SandboxRuntime = &ateapi.ActorSandboxRuntime{
+				SandboxClass: "gvisor",
+				Version: &ateapi.VersionedSandboxCompat{
+					SchemaVersion: "v1",
+					Attributes: []*ateapi.AttributeEntry{{
+						Key:            "memory_compat",
+						Value:          "v2",
+						AcceptedValues: []*ateapi.AcceptedValue{{Value: "", Fidelity: ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY}},
+					}},
+				},
+			}
+		}))),
+		want: field.ErrorList{
+			field.Forbidden(field.NewPath("status", "worker_assignment", "sandbox_runtime", "version", "attributes").Index(0).Child("accepted_values"), ""),
+		},
+	}, {
 		name:   "clear actor.status.worker_assignment",
 		oldVal: validInput(withStatus(withWorkerAssignment())),
 		newVal: validOutput(withStatus(func(s *ateapi.ActorStatus) { s.WorkerAssignment = nil })),
