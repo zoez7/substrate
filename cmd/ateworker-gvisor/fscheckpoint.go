@@ -17,17 +17,50 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 
+	"go.ate.dev/substrate/internal/hardware"
+	"go.ate.dev/substrate/internal/ocispec"
+	"go.ate.dev/substrate/internal/proto/ateletpb"
 	"go.ate.dev/substrate/internal/proto/ateworkerpb"
 	"go.ate.dev/substrate/internal/resources"
 )
 
-const fsCheckpointManifest = "fscheckpoint.pb"
+const (
+	fsCheckpointManifest = "fscheckpoint.pb"
+
+	// gvisorRootfsCompat identifies the rootfs filesystem checkpoint layout
+	// (rootfs/fscheckpoint.pb and rootfs/=<container_name>:/ target format).
+	// Bump this constant when changing rootfsFSCheckpointPaths or its layout.
+	gvisorRootfsCompat = "v1"
+
+	// gvisorVolumesCompat identifies the durable-dir filesystem checkpoint
+	// layout (fs/fscheckpoint.pb and fs/=<container_name>:<mount_path> target
+	// format). Bump this constant when changing durableFSCheckpointPaths or its
+	// layout.
+	gvisorVolumesCompat = "v1"
+)
+
+// gvisorMemoryCompat returns the worker-owned memory_compat digest for gVisor,
+// combining the shaped OCI spec hash with the checkpoint framing version.
+func gvisorMemoryCompat() string {
+	sum := sha256.Sum256([]byte(ocispec.GVisorSpecCompatHash() + "\ncheckpoint-layout:v1"))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func gvisorRuntimeAttributes() []*ateletpb.AttributeEntry {
+	return []*ateletpb.AttributeEntry{
+		{Key: hardware.AttrMemoryCompat, Value: gvisorMemoryCompat()},
+		{Key: hardware.AttrRootfsCompat, Value: gvisorRootfsCompat},
+		{Key: hardware.AttrVolumesCompat, Value: gvisorVolumesCompat},
+	}
+}
 
 // rootfsFSCheckpointPaths returns the runsc filesystem checkpoint target specs
 // (rootfs/=<container_name>:/) for all workload containers' rootfs overlays,

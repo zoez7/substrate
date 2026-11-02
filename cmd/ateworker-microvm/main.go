@@ -300,6 +300,7 @@ func do(ctx context.Context) error {
 		PodIPs:               register.ParsePodIPs(*podIPs),
 		MemoryReservedBytes:  memoryReservedBytes,
 		ActorOverhead:        actorOverhead,
+		RuntimeAttributes:    microvmRuntimeAttributes(),
 		SandboxClass:         string(atev1.SandboxClassMicroVM),
 		RuntimesFile:         nodepath.WorkerSandboxRuntimesPath(*podUID),
 	}

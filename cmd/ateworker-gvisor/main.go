@@ -324,6 +324,7 @@ func do(ctx context.Context) error {
 		Actors:               *maxActors,
 		PodIPs:               register.ParsePodIPs(*podIPs),
 		MemoryReservedBytes:  memoryReservedBytes,
+		RuntimeAttributes:    gvisorRuntimeAttributes(),
 		SandboxClass:         string(atev1.SandboxClassGvisor),
 		RuntimesFile:         nodepath.WorkerSandboxRuntimesPath(*podUID),
 	}

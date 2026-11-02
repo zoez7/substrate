@@ -1408,21 +1408,49 @@ func TestResumeActor_AteletWireRequest(t *testing.T) {
 
 	amd64RT := testSandboxRuntime()
 	arm64RT := testRuntime("arm64", "")
+	otherBundleRT := testRuntime("amd64", "other-bundle")
+	snapLayeredRT := &ateapi.ActorSandboxRuntime{
+		SandboxClass: "gvisor",
+		Version: &ateapi.VersionedSandboxCompat{
+			SchemaVersion: "v1",
+			Attributes: []*ateapi.AttributeEntry{
+				{Key: hardware.AttrArchitecture, Value: "amd64"},
+				{Key: hardware.AttrMemoryCompat, Value: "mem-1"},
+				{Key: hardware.AttrRootfsCompat, Value: "v1"},
+				{Key: hardware.AttrVolumesCompat, Value: "v1"},
+			},
+		},
+	}
+	rootfsMismatchRT := &ateapi.ActorSandboxRuntime{
+		SandboxClass: "gvisor",
+		Version: &ateapi.VersionedSandboxCompat{
+			SchemaVersion: "v1",
+			Attributes: []*ateapi.AttributeEntry{
+				{Key: hardware.AttrArchitecture, Value: "amd64"},
+				{Key: hardware.AttrMemoryCompat, Value: "mem-1"},
+				{Key: hardware.AttrRootfsCompat, Value: "v2"},
+				{Key: hardware.AttrVolumesCompat, Value: "v1"},
+			},
+		},
+	}
+	volumesMismatchRT := &ateapi.ActorSandboxRuntime{
+		SandboxClass: "gvisor",
+		Version: &ateapi.VersionedSandboxCompat{
+			SchemaVersion: "v1",
+			Attributes: []*ateapi.AttributeEntry{
+				{Key: hardware.AttrArchitecture, Value: "amd64"},
+				{Key: hardware.AttrMemoryCompat, Value: "mem-1"},
+				{Key: hardware.AttrRootfsCompat, Value: "v1"},
+				{Key: hardware.AttrVolumesCompat, Value: "v2"},
+			},
+		},
+	}
 	wantAteletRuntime := map[*ateapi.ActorSandboxRuntime]*ateletpb.ActorSandboxRuntime{
-		amd64RT: {
-			SandboxClass: "gvisor",
-			Version: &ateletpb.VersionedSandboxCompat{
-				SchemaVersion: "v1",
-				Attributes:    []*ateletpb.AttributeEntry{{Key: "architecture", Value: "amd64"}},
-			},
-		},
-		arm64RT: {
-			SandboxClass: "gvisor",
-			Version: &ateletpb.VersionedSandboxCompat{
-				SchemaVersion: "v1",
-				Attributes:    []*ateletpb.AttributeEntry{{Key: "architecture", Value: "arm64"}},
-			},
-		},
+		amd64RT:          toAteletSandboxRuntime(amd64RT),
+		arm64RT:          toAteletSandboxRuntime(arm64RT),
+		otherBundleRT:    toAteletSandboxRuntime(otherBundleRT),
+		snapLayeredRT:    toAteletSandboxRuntime(snapLayeredRT),
+		rootfsMismatchRT: toAteletSandboxRuntime(rootfsMismatchRT),
 	}
 	stampedExtSnap := func(owner ateapi.SnapshotOwner, uri string, fidelity ateapi.SnapshotFidelity, rt *ateapi.ActorSandboxRuntime) *ateapi.Snapshot {
 		snap := newDurableSnapshot(1, owner, fidelity, "", durableSnapshotName, uri, ateapi.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_COMPLETED)
@@ -1714,7 +1742,7 @@ func TestResumeActor_AteletWireRequest(t *testing.T) {
 			actor: actorSeed{
 				externalSnapshot: stampedExtSnap(ateapi.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, actorURI, fullScope, amd64RT),
 				tmplUID:          "current",
-				assignedRuntime:  arm64RT,
+				assignedRuntime:  otherBundleRT,
 			},
 			want: restoreWant{
 				snapshotName: durableSnapshotName,
@@ -1728,7 +1756,7 @@ func TestResumeActor_AteletWireRequest(t *testing.T) {
 			actor: actorSeed{
 				externalSnapshot: stampedExtSnap(ateapi.SnapshotOwner_SNAPSHOT_OWNER_TAG, goldenURI, fullScope, amd64RT),
 				tmplUID:          "current",
-				assignedRuntime:  arm64RT,
+				assignedRuntime:  otherBundleRT,
 			},
 			tmpl: templateSeed{golden: stampedExtSnap(ateapi.SnapshotOwner_SNAPSHOT_OWNER_TAG, goldenURI, fullScope, amd64RT)},
 			want: restoreWant{
@@ -1744,7 +1772,7 @@ func TestResumeActor_AteletWireRequest(t *testing.T) {
 				externalSnapshot: stampedExtSnap(ateapi.SnapshotOwner_SNAPSHOT_OWNER_TAG, actorURI, fullScope, amd64RT),
 				tmplUID:          "current",
 				sourceTag:        &ateapi.ObjectRef{Atespace: "team-a", Name: "user-tag"},
-				assignedRuntime:  arm64RT,
+				assignedRuntime:  otherBundleRT,
 			},
 			want: restoreWant{
 				snapshotName: durableSnapshotName,
@@ -1759,7 +1787,7 @@ func TestResumeActor_AteletWireRequest(t *testing.T) {
 			actor: actorSeed{
 				externalSnapshot: stampedExtSnap(ateapi.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, actorURI, fullScope, amd64RT),
 				tmplUID:          "mismatch",
-				assignedRuntime:  arm64RT,
+				assignedRuntime:  otherBundleRT,
 			},
 			want: restoreWant{
 				snapshotName: durableSnapshotName,
@@ -1773,7 +1801,7 @@ func TestResumeActor_AteletWireRequest(t *testing.T) {
 			actor: actorSeed{
 				externalSnapshot: stampedExtSnap(ateapi.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, actorURI, rootfsScope, amd64RT),
 				tmplUID:          "current",
-				assignedRuntime:  arm64RT,
+				assignedRuntime:  otherBundleRT,
 			},
 			want: restoreWant{
 				snapshotName: durableSnapshotName,
@@ -1787,7 +1815,7 @@ func TestResumeActor_AteletWireRequest(t *testing.T) {
 			actor: actorSeed{
 				localSnapshot:   stampedLocalSnap(localSnapshotName, fullScope, amd64RT),
 				localTmplUID:    "current",
-				assignedRuntime: arm64RT,
+				assignedRuntime: otherBundleRT,
 			},
 			want: restoreWant{
 				snapshotName: localSnapshotName,
@@ -1795,6 +1823,52 @@ func TestResumeActor_AteletWireRequest(t *testing.T) {
 				snapshotURI:  pauseUploadURI,
 				scope:        ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS,
 			},
+		},
+		{
+			name: "24c stamped Full durable snapshot with rootfs_compat mismatch drops to Volumes",
+			actor: actorSeed{
+				externalSnapshot: stampedExtSnap(ateapi.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, actorURI, fullScope, snapLayeredRT),
+				tmplUID:          "current",
+				assignedRuntime:  rootfsMismatchRT,
+			},
+			want: restoreWant{
+				snapshotName: durableSnapshotName,
+				kind:         ateattr.SnapshotKindLatest,
+				snapshotURI:  actorURI,
+				scope:        ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES,
+			},
+		},
+		{
+			name: "24d stamped Rootfs durable snapshot with rootfs_compat mismatch drops to Volumes",
+			actor: actorSeed{
+				externalSnapshot: stampedExtSnap(ateapi.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, actorURI, rootfsScope, snapLayeredRT),
+				tmplUID:          "current",
+				assignedRuntime:  rootfsMismatchRT,
+			},
+			want: restoreWant{
+				snapshotName: durableSnapshotName,
+				kind:         ateattr.SnapshotKindLatest,
+				snapshotURI:  actorURI,
+				scope:        ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES,
+			},
+		},
+		{
+			name: "24e stamped durable snapshot with volumes_compat mismatch fails with FailedPrecondition",
+			actor: actorSeed{
+				externalSnapshot: stampedExtSnap(ateapi.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, actorURI, fullScope, snapLayeredRT),
+				tmplUID:          "current",
+				assignedRuntime:  volumesMismatchRT,
+			},
+			want: restoreWant{code: codes.FailedPrecondition},
+		},
+		{
+			name: "24f stamped durable snapshot with architecture mismatch fails with FailedPrecondition",
+			actor: actorSeed{
+				externalSnapshot: stampedExtSnap(ateapi.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, actorURI, fullScope, amd64RT),
+				tmplUID:          "current",
+				assignedRuntime:  arm64RT,
+			},
+			want: restoreWant{code: codes.FailedPrecondition},
 		},
 		{
 			name: "24b stamped local snapshot on matching worker restores in Full",
@@ -2683,7 +2757,7 @@ type relaxingTestScheduler struct {
 }
 
 func (s *relaxingTestScheduler) Schedule(_ context.Context, c scheduling.Constraints) (*ateapi.Worker, error) {
-	if c.RequiredRuntime.Runtime() != nil {
+	if c.RequiredRuntime.MinFidelity() == ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY {
 		return nil, scheduling.ErrNoCapacity
 	}
 	return s.relaxedWorker, nil
@@ -2703,7 +2777,7 @@ func TestAssignWorkerAttempt_PrefersRuntimeMatchingWorkerAndFallsBack(t *testing
 	t.Run("places on runtime-compatible worker when available", func(t *testing.T) {
 		ctx := context.Background()
 		st := newTestPersistence(t)
-		seedRuntimeWorker(t, ctx, st, "arm-pod", "node-arm", arm64RT)
+		seedRuntimeWorker(t, ctx, st, "other-pod", "node-other", newDefaultRT)
 		seedRuntimeWorker(t, ctx, st, "amd-pod", "node-amd", amd64RT)
 		actor := seedActorWithSnapshot(t, ctx, st, suspended, "", durableMemorySnapshot(t, amd64RT))
 
@@ -2735,18 +2809,30 @@ func TestAssignWorkerAttempt_PrefersRuntimeMatchingWorkerAndFallsBack(t *testing
 	t.Run("falls back to incompatible worker when no runtime-matching worker has room", func(t *testing.T) {
 		ctx := context.Background()
 		st := newTestPersistence(t)
-		seedRuntimeWorker(t, ctx, st, "arm-pod", "node-arm", arm64RT)
+		seedRuntimeWorker(t, ctx, st, "new-pod", "node-new", newDefaultRT)
 		actor := seedActorWithSnapshot(t, ctx, st, suspended, "", durableMemorySnapshot(t, amd64RT))
 
 		stored, worker, err := newSchedulingWorkflow(t, ctx, st).assignWorkerAttempt(ctx, actorRef, actor, &ateapi.ActorTemplate{})
 		if err != nil {
 			t.Fatalf("assignWorkerAttempt: %v", err)
 		}
-		if got := worker.GetWorkerPod(); got != "arm-pod" {
-			t.Errorf("assigned worker = %q, want %q", got, "arm-pod")
+		if got := worker.GetWorkerPod(); got != "new-pod" {
+			t.Errorf("assigned worker = %q, want %q", got, "new-pod")
 		}
 		// The restore without memory state runs under the fallback worker's default.
-		assertAssignedRuntime(t, stored, arm64RT)
+		assertAssignedRuntime(t, stored, newDefaultRT)
+	})
+
+	t.Run("does not fall back to a worker of another architecture", func(t *testing.T) {
+		ctx := context.Background()
+		st := newTestPersistence(t)
+		seedRuntimeWorker(t, ctx, st, "arm-pod", "node-arm", arm64RT)
+		actor := seedActorWithSnapshot(t, ctx, st, suspended, "", durableMemorySnapshot(t, amd64RT))
+
+		_, _, err := newSchedulingWorkflow(t, ctx, st).assignWorkerAttempt(ctx, actorRef, actor, &ateapi.ActorTemplate{})
+		if apierror.Code(err) != codes.ResourceExhausted {
+			t.Fatalf("assignWorkerAttempt with only an arm64 worker = %v, want ResourceExhausted", err)
+		}
 	})
 
 	t.Run("does not fall back to a worker of another sandbox class", func(t *testing.T) {
@@ -2848,30 +2934,30 @@ func TestValidateAssignedWorker_RuntimeFallback(t *testing.T) {
 	t.Run("accepts fallback worker on re-entry for durable snapshot", func(t *testing.T) {
 		ctx := context.Background()
 		st := newTestPersistence(t)
-		arm64RT := testRuntime("arm64", "")
-		seedRuntimeWorker(t, ctx, st, "arm-pod", "node-arm", arm64RT)
-		seedAssignment(t, st, testWorkerUID("arm-pod"), &ateapi.ActorAssignment{
+		otherBundleRT := testRuntime("amd64", "other-bundle")
+		seedRuntimeWorker(t, ctx, st, "fallback-pod", "node-fallback", otherBundleRT)
+		seedAssignment(t, st, testWorkerUID("fallback-pod"), &ateapi.ActorAssignment{
 			Actor:    &ateapi.ObjectRef{Atespace: "team-a", Name: "id1"},
 			ActorUid: "own-actor-uid",
 		})
 
 		// A previous attempt bound the actor relaxed, under the worker's
-		// default, because no worker could restore its amd64 snapshot.
+		// default, because no worker could restore its snapshot at MEMORY.
 		resumingActor := &ateapi.Actor{
 			Metadata: &ateapi.ResourceMetadata{Atespace: "team-a", Name: "id1", Uid: "own-actor-uid"},
 			Status: &ateapi.ActorStatus{
 				State:                  ateapi.ActorState_ACTOR_STATE_RESUMING,
-				AssignedNode:           "node-arm",
+				AssignedNode:           "node-fallback",
 				LastAssignedGeneration: 1,
 				Snapshots:              []*ateapi.Snapshot{durableMemorySnapshot(t, testSandboxRuntime())},
 				WorkerAssignment: &ateapi.WorkerAssignment{
-					Worker:          &ateapi.ObjectRef{Name: testWorkerUID("arm-pod")},
+					Worker:          &ateapi.ObjectRef{Name: testWorkerUID("fallback-pod")},
 					WorkerNamespace: "worker-ns",
 					WorkerPool:      "pool",
-					WorkerPod:       "arm-pod",
-					WorkerPodUid:    testWorkerUID("arm-pod"),
-					NodeName:        "node-arm",
-					SandboxRuntime:  arm64RT,
+					WorkerPod:       "fallback-pod",
+					WorkerPodUid:    testWorkerUID("fallback-pod"),
+					NodeName:        "node-fallback",
+					SandboxRuntime:  otherBundleRT,
 				},
 			},
 		}
@@ -2881,40 +2967,40 @@ func TestValidateAssignedWorker_RuntimeFallback(t *testing.T) {
 		if err != nil {
 			t.Fatalf("validateAssignedWorker: %v", err)
 		}
-		if got := worker.GetWorkerPod(); got != "arm-pod" {
-			t.Errorf("validated worker = %q, want %q", got, "arm-pod")
+		if got := worker.GetWorkerPod(); got != "fallback-pod" {
+			t.Errorf("validated worker = %q, want %q", got, "fallback-pod")
 		}
 	})
 
 	t.Run("accepts fallback worker on re-entry for an uploaded pause snapshot", func(t *testing.T) {
 		ctx := context.Background()
 		st := newTestPersistence(t)
-		arm64RT := testRuntime("arm64", "")
-		seedRuntimeWorker(t, ctx, st, "arm-pod", "node-arm", arm64RT)
-		seedAssignment(t, st, testWorkerUID("arm-pod"), &ateapi.ActorAssignment{
+		otherBundleRT := testRuntime("amd64", "other-bundle")
+		seedRuntimeWorker(t, ctx, st, "fallback-pod", "node-fallback", otherBundleRT)
+		seedAssignment(t, st, testWorkerUID("fallback-pod"), &ateapi.ActorAssignment{
 			Actor:    &ateapi.ObjectRef{Atespace: "team-a", Name: "id1"},
 			ActorUid: "own-actor-uid",
 		})
 
 		// Re-entry must accept a previously allowed ROOTFS assignment.
-		local := newPausedSnapshot(t, 1, ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "", "local-1", "node-arm")
+		local := newPausedSnapshot(t, 1, ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "", "local-1", "node-fallback")
 		local.SandboxRuntime = testSandboxRuntime()
 		local.DurableSnapshot.State = ateapi.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_COMPLETED
 		resumingActor := &ateapi.Actor{
 			Metadata: &ateapi.ResourceMetadata{Atespace: "team-a", Name: "id1", Uid: "own-actor-uid"},
 			Status: &ateapi.ActorStatus{
 				State:                  ateapi.ActorState_ACTOR_STATE_RESUMING,
-				AssignedNode:           "node-arm",
+				AssignedNode:           "node-fallback",
 				LastAssignedGeneration: 1,
 				Snapshots:              []*ateapi.Snapshot{local},
 				WorkerAssignment: &ateapi.WorkerAssignment{
-					Worker:          &ateapi.ObjectRef{Name: testWorkerUID("arm-pod")},
+					Worker:          &ateapi.ObjectRef{Name: testWorkerUID("fallback-pod")},
 					WorkerNamespace: "worker-ns",
 					WorkerPool:      "pool",
-					WorkerPod:       "arm-pod",
-					WorkerPodUid:    testWorkerUID("arm-pod"),
-					NodeName:        "node-arm",
-					SandboxRuntime:  arm64RT,
+					WorkerPod:       "fallback-pod",
+					WorkerPodUid:    testWorkerUID("fallback-pod"),
+					NodeName:        "node-fallback",
+					SandboxRuntime:  otherBundleRT,
 				},
 			},
 		}
@@ -2924,8 +3010,8 @@ func TestValidateAssignedWorker_RuntimeFallback(t *testing.T) {
 		if err != nil {
 			t.Fatalf("validateAssignedWorker: %v", err)
 		}
-		if got := worker.GetWorkerPod(); got != "arm-pod" {
-			t.Errorf("validated worker = %q, want %q", got, "arm-pod")
+		if got := worker.GetWorkerPod(); got != "fallback-pod" {
+			t.Errorf("validated worker = %q, want %q", got, "fallback-pod")
 		}
 	})
 }

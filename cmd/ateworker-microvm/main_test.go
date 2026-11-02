@@ -18,11 +18,13 @@ package main
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"google.golang.org/grpc/codes"
 
 	"go.ate.dev/substrate/internal/apierror"
+	"go.ate.dev/substrate/internal/hardware"
 	"go.ate.dev/substrate/internal/nodepath"
 	"go.ate.dev/substrate/internal/proto/ateworkerpb"
 )
@@ -109,4 +111,21 @@ func validRunRequest() *ateworkerpb.RunWorkloadRequest {
 
 func validRestoreRequest() *ateworkerpb.RestoreWorkloadRequest {
 	return &ateworkerpb.RestoreWorkloadRequest{Atespace: testActor.Ref.Atespace, ActorName: testActor.Ref.Name, ActorUid: testActor.UID, Spec: testSpec(), ActorDirs: testDirs(), Fidelity: ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY}
+}
+
+func TestMicroVMRuntimeAttributes(t *testing.T) {
+	attrs := microvmRuntimeAttributes()
+	byKey := make(map[string]string, len(attrs))
+	for _, a := range attrs {
+		byKey[a.GetKey()] = a.GetValue()
+	}
+	if got := byKey[hardware.AttrMemoryCompat]; !strings.HasPrefix(got, "sha256:") || len(got) != len("sha256:")+64 {
+		t.Errorf("memory_compat = %q, want sha256:<64 hex chars>", got)
+	}
+	if got := byKey[hardware.AttrRootfsCompat]; got != "v1" {
+		t.Errorf("rootfs_compat = %q, want v1", got)
+	}
+	if got := byKey[hardware.AttrVolumesCompat]; got != "v1" {
+		t.Errorf("volumes_compat = %q, want v1", got)
+	}
 }

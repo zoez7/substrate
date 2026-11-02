@@ -19,6 +19,7 @@
 package register
 
 import (
+	"cmp"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -185,6 +186,42 @@ func setActorOverhead(req *ateletpb.SetWorkerSandboxRuntimesRequest, overhead *a
 	}
 }
 
+// setRuntimeAttributes merges a copy of extra into every runtime's version
+// attributes in req, keeping attributes sorted by key.
+func setRuntimeAttributes(req *ateletpb.SetWorkerSandboxRuntimesRequest, extra []*ateletpb.AttributeEntry) {
+	if len(extra) == 0 {
+		return
+	}
+	merge := func(v *ateletpb.VersionedSandboxCompat) {
+		if v == nil {
+			return
+		}
+		for _, e := range extra {
+			cloned := proto.CloneOf(e)
+			replaced := false
+			for i, existing := range v.Attributes {
+				if existing.GetKey() == cloned.GetKey() {
+					v.Attributes[i] = cloned
+					replaced = true
+					break
+				}
+			}
+			if !replaced {
+				v.Attributes = append(v.Attributes, cloned)
+			}
+		}
+		slices.SortFunc(v.Attributes, func(a, b *ateletpb.AttributeEntry) int {
+			return cmp.Compare(a.GetKey(), b.GetKey())
+		})
+	}
+	for _, c := range req.GetSandboxClasses() {
+		merge(c.GetDefaultRuntime().GetVersion())
+		for _, rt := range c.GetRestorableRuntimes() {
+			merge(rt.GetVersion())
+		}
+	}
+}
+
 // classOf returns f's entry for class, or nil when the file has none.
 func classOf(f *sandboxruntimes.File, class string) *sandboxruntimes.Class {
 	for i := range f.SandboxClasses {
@@ -230,6 +267,10 @@ type ReportConfig struct {
 	// ActorOverhead is what each actor costs the worker on top of its own
 	// limits, reported on every runtime. Nil is none.
 	ActorOverhead *ateletpb.RuntimeOverhead
+	// RuntimeAttributes are worker-owned compatibility attributes merged into
+	// every runtime version this worker reports (DefaultRuntime and
+	// RestorableRuntimes).
+	RuntimeAttributes []*ateletpb.AttributeEntry
 	// SandboxClass is the class this worker implements ("gvisor", "microvm").
 	SandboxClass string
 	// RuntimesFile is the sandbox runtimes file atelet keeps for this worker
@@ -449,6 +490,7 @@ func (r *reconciler) sync(ctx context.Context) (retry bool, err error) {
 	}
 	req := buildRuntimesRequest(r.epoch, class)
 	setActorOverhead(req, r.cfg.ActorOverhead)
+	setRuntimeAttributes(req, r.cfg.RuntimeAttributes)
 	if proto.Equal(req, r.reported) {
 		return false, nil
 	}

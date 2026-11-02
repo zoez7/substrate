@@ -58,6 +58,11 @@ import (
 	"go.ate.dev/substrate/internal/tarutil"
 )
 
+// microvmRootfsCompat identifies the microVM rootfs upper tar format
+// (rootfs-upper-<containerID>.tar, relative to upperdir with a root entry).
+// Bump this constant when changing rootfsUpperTarFile or its archive layout.
+const microvmRootfsCompat = "v1"
+
 // rootfsUpperTarFile is the snapshot file holding the tar of one container's
 // rootfs upperdir (<name>/fs under rootfsUpperDir, see kata.UpperWorkDirs).
 // Entries are relative to the upperdir, plus a root entry: overlayfs presents

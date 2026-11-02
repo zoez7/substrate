@@ -18,6 +18,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -26,6 +28,9 @@ import (
 	"time"
 
 	"go.ate.dev/substrate/internal/apierror"
+	"go.ate.dev/substrate/internal/hardware"
+	"go.ate.dev/substrate/internal/ocispec"
+	"go.ate.dev/substrate/internal/proto/ateletpb"
 	"go.ate.dev/substrate/internal/resources"
 
 	"go.ate.dev/substrate/cmd/ateworker-microvm/internal/ch"
@@ -40,6 +45,22 @@ import (
 	"go.ate.dev/substrate/internal/workerstats"
 	"golang.org/x/sync/errgroup"
 )
+
+// microvmMemoryCompat returns the worker-owned memory_compat digest for
+// microVM, combining the shaped OCI spec hash with the system-info transport
+// and Cloud Hypervisor snapshot framing versions.
+func microvmMemoryCompat() string {
+	sum := sha256.Sum256([]byte(ocispec.MicroVMSpecCompatHash() + "\nsystem-info:virtiofs:v1\nch-snapshot:v1"))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func microvmRuntimeAttributes() []*ateletpb.AttributeEntry {
+	return []*ateletpb.AttributeEntry{
+		{Key: hardware.AttrMemoryCompat, Value: microvmMemoryCompat()},
+		{Key: hardware.AttrRootfsCompat, Value: microvmRootfsCompat},
+		{Key: hardware.AttrVolumesCompat, Value: microvmVolumesCompat},
+	}
+}
 
 // CheckpointWorkload suspends the actor and writes a portable snapshot.
 //

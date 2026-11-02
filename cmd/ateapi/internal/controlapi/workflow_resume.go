@@ -425,8 +425,14 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 
 	assignedWorker, err := w.scheduler.Schedule(ctx, constraints)
 	if errors.Is(err, scheduling.ErrNoCapacity) && relaxable {
-		constraints.RequiredRuntime = hardware.Requirement{}
-		assignedWorker, err = w.scheduler.Schedule(ctx, constraints)
+		if constraints.RequiredRuntime.MinFidelity() > ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS {
+			constraints.RequiredRuntime = constraints.RequiredRuntime.WithMinFidelity(ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS)
+			assignedWorker, err = w.scheduler.Schedule(ctx, constraints)
+		}
+		if errors.Is(err, scheduling.ErrNoCapacity) && constraints.RequiredRuntime.MinFidelity() > ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES {
+			constraints.RequiredRuntime = constraints.RequiredRuntime.WithMinFidelity(ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES)
+			assignedWorker, err = w.scheduler.Schedule(ctx, constraints)
+		}
 	}
 	if err != nil {
 		if errors.Is(err, scheduling.ErrNoCapacity) {
@@ -570,11 +576,10 @@ func schedulingConstraints(actor *ateapi.Actor, tmpl *ateapi.ActorTemplate) sche
 	if node := actor.GetStatus().GetAssignedNode(); node != "" {
 		requiredNodes = []string{node}
 	}
-	required := hardware.NewRequirement(requiredSnapshotRuntime(snap, tmpl))
 	c := scheduling.Constraints{
 		SandboxClass:    snap.GetSandboxRuntime().GetSandboxClass(),
-		RequiredRuntime: required,
-		SnapshotRuntime: required,
+		RequiredRuntime: requiredRuntimeConstraint(snap, tmpl),
+		SnapshotRuntime: hardware.NewRequirement(requiredSnapshotRuntime(snap, tmpl)),
 		ActorSelector:   labels.SelectorFromSet(labels.Set(actor.GetWorkerSelector().GetMatchLabels())),
 		RequiredNodes:   requiredNodes,
 		Limits:          tmpl.GetResources().GetLimits(),
@@ -583,6 +588,22 @@ func schedulingConstraints(actor *ateapi.Actor, tmpl *ateapi.ActorTemplate) sche
 		c.TemplateSelector = labels.SelectorFromSet(labels.Set(sel.GetMatchLabels()))
 	}
 	return c
+}
+
+// requiredRuntimeConstraint builds the hardware.Requirement that a candidate
+// worker must satisfy at scheduling time for snap and tmpl.
+func requiredRuntimeConstraint(snap *ateapi.Snapshot, tmpl *ateapi.ActorTemplate) hardware.Requirement {
+	if snap == nil || snap.GetSandboxRuntime() == nil {
+		return hardware.Requirement{}
+	}
+	req := hardware.NewRequirement(snap.GetSandboxRuntime())
+	if templateReplaced(snap, tmpl) || snap.GetFidelity() == ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES {
+		return req.WithMinFidelity(ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES)
+	}
+	if snap.GetFidelity() == ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS {
+		return req.WithMinFidelity(ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS)
+	}
+	return req
 }
 
 // snapshotToResume returns the snapshot ResumeActor restores from: the latest
@@ -612,9 +633,10 @@ func requiredSnapshotRuntime(snap *ateapi.Snapshot, tmpl *ateapi.ActorTemplate) 
 	return snap.GetSandboxRuntime()
 }
 
-// canRelaxRuntime reports whether scheduling may drop its runtime requirement.
+// canRelaxRuntime reports whether scheduling may relax its runtime requirement
+// to a lower snapshot fidelity.
 func canRelaxRuntime(actor *ateapi.Actor, constraints scheduling.Constraints) bool {
-	if constraints.RequiredRuntime.Runtime() == nil {
+	if constraints.RequiredRuntime.Runtime() == nil || constraints.RequiredRuntime.MinFidelity() <= ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES {
 		return false
 	}
 	status := actor.GetStatus()
@@ -636,14 +658,14 @@ func canRelaxRuntime(actor *ateapi.Actor, constraints scheduling.Constraints) bo
 }
 
 // appliesWithFallback reports whether worker satisfies constraints, or — when
-// relaxable — satisfies constraints with RequiredRuntime relaxed.
+// relaxable — satisfies constraints with RequiredRuntime relaxed down to
+// SNAPSHOT_FIDELITY_VOLUMES.
 func (w *ActorWorkflow) appliesWithFallback(worker *ateapi.Worker, constraints scheduling.Constraints, relaxable bool) bool {
 	relaxed := constraints
-	relaxed.RequiredRuntime = hardware.Requirement{}
-	if !w.scheduler.Applies(worker, relaxed) {
-		return false
+	if relaxable {
+		relaxed.RequiredRuntime = relaxed.RequiredRuntime.WithMinFidelity(ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES)
 	}
-	return relaxable || constraints.RequiredRuntime.WorkerMatches(worker.GetStatus())
+	return w.scheduler.Applies(worker, relaxed)
 }
 
 // ensureVolumesAttached attaches the actor's mounted external volumes to the
@@ -770,20 +792,21 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 		tele.SnapshotKind = ateattr.SnapshotKindLocal
 	}
 
-	// Exclusive by construction: requiredSnapshotRuntime returns nil when the
-	// template changed, so runtimeIncompatible is false when templateReplaced
-	// is true.
-	requiredRuntime := requiredSnapshotRuntime(snap, actorTemplate)
-	runtimeIncompatible := requiredRuntime != nil && !hardware.Matches(assignment.GetSandboxRuntime(), requiredRuntime)
-
-	fidelity := fidelityToAtelet(snap.GetFidelity())
-	switch {
-	case templateReplaced(snap, actorTemplate):
-		fidelity = ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES
-	case runtimeIncompatible:
-		logRuntimeFallback(ctx, actorRef, assignment, requiredRuntime)
-		fidelity = ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS
+	effectiveFidelity := snap.GetFidelity()
+	if templateReplaced(snap, actorTemplate) {
+		effectiveFidelity = ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES
 	}
+	if snapRuntime := snap.GetSandboxRuntime(); snapRuntime != nil {
+		maxFidelity := hardware.MaxFidelityForRuntime(assignment.GetSandboxRuntime(), snapRuntime)
+		if maxFidelity == ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_UNSPECIFIED {
+			return tele, 0, apierror.FailedPrecondition("assigned worker runtime is incompatible with snapshot %s", snap.GetUuid())
+		}
+		if maxFidelity < effectiveFidelity {
+			logRuntimeFallback(ctx, actorRef, assignment, snapRuntime, effectiveFidelity, maxFidelity)
+			effectiveFidelity = maxFidelity
+		}
+	}
+	fidelity := fidelityToAtelet(effectiveFidelity)
 	tele.WireFidelity = ateattr.SnapshotFidelityValue(fidelity)
 	req := &ateletpb.RestoreRequest{
 		WorkerPodUid:          assignment.GetWorkerPodUid(),
@@ -825,13 +848,15 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 	return tele, resp.GetWorkerEpoch(), nil
 }
 
-// logRuntimeFallback records a resume that restores without memory state
-// because the assigned worker does not run the runtime the snapshot's memory
-// state was captured under.
-func logRuntimeFallback(ctx context.Context, actorRef resources.ActorRef, assignment *ateapi.WorkerAssignment, required *ateapi.ActorSandboxRuntime) {
-	slog.WarnContext(ctx, "Assigned worker cannot restore the snapshot's runtime; restoring without memory state",
+// logRuntimeFallback records a resume that restores at a lower fidelity
+// because the assigned worker cannot restore the snapshot at its captured
+// fidelity.
+func logRuntimeFallback(ctx context.Context, actorRef resources.ActorRef, assignment *ateapi.WorkerAssignment, required *ateapi.ActorSandboxRuntime, fromFidelity, toFidelity ateapi.SnapshotFidelity) {
+	slog.WarnContext(ctx, "Assigned worker cannot restore the snapshot at its captured fidelity; falling back",
 		slog.String("actor", actorRef.String()),
 		slog.String("worker", assignment.GetWorkerPod()),
+		slog.String("from_fidelity", fromFidelity.String()),
+		slog.String("to_fidelity", toFidelity.String()),
 		slog.Any("required_runtime", required),
 		slog.Any("assigned_runtime", assignment.GetSandboxRuntime()))
 }

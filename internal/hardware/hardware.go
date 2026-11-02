@@ -48,7 +48,35 @@ const (
 	// AttrCPUModel identifies the host CPU family/model (e.g. "6:143" on amd64
 	// or "0x0:0xd40:1" on arm64) reported by microVM runtimes.
 	AttrCPUModel = "cpu_model"
+
+	// AttrMemoryCompat identifies the worker's memory-checkpoint compatibility
+	// contract (shaped OCI spec hash and memory checkpoint framing). A mismatch
+	// degrades a memory snapshot to SNAPSHOT_FIDELITY_ROOTFS.
+	AttrMemoryCompat = "memory_compat"
+
+	// AttrRootfsCompat identifies the worker's rootfs-layer compatibility
+	// contract. A mismatch degrades a snapshot to SNAPSHOT_FIDELITY_VOLUMES.
+	AttrRootfsCompat = "rootfs_compat"
+
+	// AttrVolumesCompat identifies the worker's durable-volume compatibility
+	// contract. A mismatch prevents restoring even durable volumes.
+	AttrVolumesCompat = "volumes_compat"
 )
+
+// attributeMismatchFidelity returns the highest SnapshotFidelity a worker can
+// still achieve when key fails to match between the worker and the snapshot.
+func attributeMismatchFidelity(key string) ateapi.SnapshotFidelity {
+	switch key {
+	case AttrArchitecture, AttrVolumesCompat:
+		return ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_UNSPECIFIED
+	case AttrRootfsCompat:
+		return ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES
+	case AttrSandboxBundleHash, AttrCPUFeatures, AttrCPUVendor, AttrCPUModel, AttrMemoryCompat:
+		return ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS
+	default:
+		return ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS
+	}
+}
 
 // ProbeHost returns a minimal v1 VersionedSandboxCompat with the current
 // host's architecture in atelet wire format, for synthetic workers in tests
@@ -72,8 +100,9 @@ func ProbeHost() *ateletpb.VersionedSandboxCompat {
 // AttrCPUFeatures is parsed here, once, rather than on every comparison. The
 // zero Requirement, like NewRequirement(nil), requires nothing.
 type Requirement struct {
-	snap   *ateapi.ActorSandboxRuntime
-	compat *ateapi.VersionedSandboxCompat // snap's version
+	snap        *ateapi.ActorSandboxRuntime
+	compat      *ateapi.VersionedSandboxCompat // snap's version
+	minFidelity ateapi.SnapshotFidelity
 	// cpuFeatures is compat's AttrCPUFeatures parsed, when it has one.
 	// badCPUFeatures records one that is not a canonical mask, which no
 	// worker satisfies.
@@ -85,6 +114,9 @@ type Requirement struct {
 func NewRequirement(snap *ateapi.ActorSandboxRuntime) Requirement {
 	r := compatRequirement(snap.GetVersion())
 	r.snap = snap
+	if snap != nil {
+		r.minFidelity = ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY
+	}
 	return r
 }
 
@@ -101,6 +133,21 @@ func compatRequirement(compat *ateapi.VersionedSandboxCompat) Requirement {
 	return r
 }
 
+// WithMinFidelity returns a copy of r whose WorkerMatches accepts any worker
+// reaching at least f. A zero or nil-snap Requirement stays unconstrained.
+func (r Requirement) WithMinFidelity(f ateapi.SnapshotFidelity) Requirement {
+	if r.snap != nil {
+		r.minFidelity = f
+	}
+	return r
+}
+
+// MinFidelity returns the minimum SnapshotFidelity WorkerMatches accepts, or
+// SNAPSHOT_FIDELITY_UNSPECIFIED when the requirement is unconstrained.
+func (r Requirement) MinFidelity() ateapi.SnapshotFidelity {
+	return r.minFidelity
+}
+
 // Runtime returns the ActorSandboxRuntime the requirement was prepared from, or
 // nil when it requires nothing.
 func (r Requirement) Runtime() *ateapi.ActorSandboxRuntime {
@@ -108,8 +155,9 @@ func (r Requirement) Runtime() *ateapi.ActorSandboxRuntime {
 }
 
 // Matches reports whether rt, the runtime an assignment records, can restore
-// the snapshot. A requirement of nothing is met by any runtime. Otherwise the
-// sandbox classes must be equal and the compat must match.
+// the snapshot at SNAPSHOT_FIDELITY_MEMORY. A requirement of nothing is met by
+// any runtime. Otherwise the sandbox classes must be equal and the compat must
+// match.
 func (r Requirement) Matches(rt *ateapi.ActorSandboxRuntime) bool {
 	if r.snap == nil {
 		return true
@@ -120,44 +168,97 @@ func (r Requirement) Matches(rt *ateapi.ActorSandboxRuntime) bool {
 	return r.matchesCompat(rt.GetVersion())
 }
 
-// matchesCompat reports whether worker can restore the snapshot: the same
-// non-empty schema version, and every attribute on the snapshot satisfied by
-// worker. AttrCPUFeatures is satisfied when the snapshot's feature bitmask is
-// a subset of the worker's; every other attribute must be present on worker
-// with an equal value. Keys only the worker has are ignored, so a worker can
-// start reporting a new key under the same schema version without
-// invalidating the snapshots taken before it; removing or recomputing a key
-// is a new schema version, under which older snapshots no longer match.
+// matchesCompat reports whether worker can restore the snapshot at
+// SNAPSHOT_FIDELITY_MEMORY.
 func (r Requirement) matchesCompat(worker *ateapi.VersionedSandboxCompat) bool {
+	return r.maxCompatFidelity(worker) == ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY
+}
+
+// maxCompatFidelity returns the highest SnapshotFidelity that worker can
+// restore the snapshot at. Each mismatched or missing attribute caps the
+// fidelity to attributeMismatchFidelity(key).
+func (r Requirement) maxCompatFidelity(worker *ateapi.VersionedSandboxCompat) ateapi.SnapshotFidelity {
 	if worker == nil || r.compat == nil {
-		return false
+		return ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_UNSPECIFIED
 	}
 	if worker.GetSchemaVersion() == "" || worker.GetSchemaVersion() != r.compat.GetSchemaVersion() {
-		return false
+		return ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_UNSPECIFIED
 	}
 	if r.badCPUFeatures {
-		return false
+		return ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_UNSPECIFIED
 	}
+	best := ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY
 	wAttrs := worker.GetAttributes()
+	sAttrs := r.compat.GetAttributes()
 	// API validation bounds attributes to at most 32 entries with unique keys,
 	// so the nested scan is small and avoids map allocation on the hot path.
-	for _, sa := range r.compat.GetAttributes() {
-		found := false
-		for _, wa := range wAttrs {
-			if wa.GetKey() != sa.GetKey() {
-				continue
+	for _, wa := range wAttrs {
+		var sa *ateapi.AttributeEntry
+		for _, cand := range sAttrs {
+			if cand.GetKey() == wa.GetKey() {
+				sa = cand
+				break
 			}
-			if !r.attributeSatisfied(sa.GetKey(), wa.GetValue(), sa.GetValue()) {
-				return false
-			}
-			found = true
-			break
 		}
-		if !found {
-			return false
+		if sa == nil || !r.attributeSatisfied(wa.GetKey(), wa.GetValue(), sa.GetValue()) {
+			best = min(best, attributeMismatchFidelity(wa.GetKey()))
+			if best == ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_UNSPECIFIED {
+				return best
+			}
 		}
 	}
-	return true
+	for _, sa := range sAttrs {
+		found := false
+		for _, wa := range wAttrs {
+			if wa.GetKey() == sa.GetKey() {
+				found = true
+				break
+			}
+		}
+		if !found {
+			best = min(best, attributeMismatchFidelity(sa.GetKey()))
+			if best == ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_UNSPECIFIED {
+				return best
+			}
+		}
+	}
+	return best
+}
+
+// MaxFidelityForRuntime returns the highest SnapshotFidelity that rt can
+// restore the snapshot at. A requirement of nothing returns
+// SNAPSHOT_FIDELITY_MEMORY.
+func (r Requirement) MaxFidelityForRuntime(rt *ateapi.ActorSandboxRuntime) ateapi.SnapshotFidelity {
+	if r.snap == nil {
+		return ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY
+	}
+	if rt == nil || rt.GetSandboxClass() != r.snap.GetSandboxClass() {
+		return ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_UNSPECIFIED
+	}
+	return r.maxCompatFidelity(rt.GetVersion())
+}
+
+// MaxFidelity returns the highest SnapshotFidelity that a worker with status
+// can restore the snapshot at. RestorableRuntimes only restore at
+// SNAPSHOT_FIDELITY_MEMORY; lower fidelities boot fresh under DefaultRuntime.
+func (r Requirement) MaxFidelity(status *ateapi.WorkerStatus) ateapi.SnapshotFidelity {
+	if r.snap == nil {
+		return ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY
+	}
+	c := classOf(status, r.snap.GetSandboxClass())
+	if c == nil {
+		return ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_UNSPECIFIED
+	}
+	defFid := r.maxCompatFidelity(c.GetDefaultRuntime().GetVersion())
+	if defFid == ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY {
+		return defFid
+	}
+	for _, rt := range c.GetRestorableRuntimes() {
+		if r.maxCompatFidelity(rt.GetVersion()) == ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY {
+			return ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY
+		}
+	}
+	return defFid
 }
 
 // attributeSatisfied reports whether a worker's value for key satisfies the
@@ -225,9 +326,10 @@ func (r Requirement) MatchingRuntime(status *ateapi.WorkerStatus) *ateapi.ActorS
 }
 
 // WorkerMatches reports whether a worker with status can restore the
-// snapshot. A requirement of nothing is met by any worker.
+// snapshot at or above the requirement's minimum fidelity. A requirement of
+// nothing is met by any worker.
 func (r Requirement) WorkerMatches(status *ateapi.WorkerStatus) bool {
-	return r.snap == nil || r.matchingRuntime(status) != nil
+	return r.snap == nil || r.MaxFidelity(status) >= r.minFidelity
 }
 
 // WorkerRuntimeFor returns the worker's runtime that RuntimeFor stamps, as the
@@ -306,4 +408,14 @@ func WorkerMatches(status *ateapi.WorkerStatus, snap *ateapi.ActorSandboxRuntime
 // RuntimeFor is NewRequirement(snap).RuntimeFor(status).
 func RuntimeFor(status *ateapi.WorkerStatus, snap *ateapi.ActorSandboxRuntime) *ateapi.ActorSandboxRuntime {
 	return NewRequirement(snap).RuntimeFor(status)
+}
+
+// MaxFidelity is NewRequirement(snap).MaxFidelity(status).
+func MaxFidelity(status *ateapi.WorkerStatus, snap *ateapi.ActorSandboxRuntime) ateapi.SnapshotFidelity {
+	return NewRequirement(snap).MaxFidelity(status)
+}
+
+// MaxFidelityForRuntime is NewRequirement(snap).MaxFidelityForRuntime(rt).
+func MaxFidelityForRuntime(rt, snap *ateapi.ActorSandboxRuntime) ateapi.SnapshotFidelity {
+	return NewRequirement(snap).MaxFidelityForRuntime(rt)
 }

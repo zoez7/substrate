@@ -205,11 +205,18 @@ func TestDetachFromFullNode(t *testing.T) {
 		name:         "room only on another runtime: detaches",
 		node:         "node-1",
 		otherNode:    true,
-		otherRuntime: arm64RT,
+		otherRuntime: testRuntime("amd64", "other-bundle"),
 		snapRuntime:  amd64RT,
 		detachState:  detachedState,
 		wantDetached: true,
 		wantCall:     true,
+	}, {
+		name:         "room only on another architecture: does not detach",
+		node:         "node-1",
+		otherNode:    true,
+		otherRuntime: arm64RT,
+		snapRuntime:  amd64RT,
+		wantCode:     codes.ResourceExhausted,
 	}, {
 		name:         "no atelet on the node, upload completed: detaches",
 		node:         "node-3",
@@ -605,7 +612,7 @@ func TestResumeActor_NodeGoneWithPendingUpload(t *testing.T) {
 			workerRuntime := testSandboxRuntime()
 			wantFidelity := ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY
 			if tt.otherRuntime {
-				workerRuntime = testRuntime("arm64", "")
+				workerRuntime = testRuntime("amd64", "other-bundle")
 				wantFidelity = ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS
 			}
 			worker := seedRuntimeWorker(t, ctx, st, "pod-2", "node-2", workerRuntime)

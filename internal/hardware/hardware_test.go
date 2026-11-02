@@ -81,7 +81,7 @@ func TestMatches(t *testing.T) {
 		{"different attribute value fails", arm64GVisor, amd64GVisor, false},
 		{"different sandbox class fails", amd64MicroVM, amd64GVisor, false},
 		{"different schema version fails", amd64GVisorV2, amd64GVisor, false},
-		{"attribute only the worker has is ignored", amd64GVisorExtraAttr, amd64GVisor, true},
+		{"attribute only the worker has fails at memory fidelity", amd64GVisorExtraAttr, amd64GVisor, false},
 		{"attribute missing on worker fails", amd64GVisor, amd64GVisorExtraAttr, false},
 		{"nil worker fails when snapshot is stamped", nil, amd64GVisor, false},
 		{"nil version fails", &ateapi.ActorSandboxRuntime{SandboxClass: "gvisor"}, amd64GVisor, false},
@@ -126,7 +126,7 @@ func TestMatchesCompat(t *testing.T) {
 		want         bool
 	}{
 		{"equal", compat("v1", amd64), compat("v1", amd64), true},
-		{"key only the worker has is ignored", compat("v1", amd64, cpuBits("7")), compat("v1", amd64), true},
+		{"key only the worker has fails at memory fidelity", compat("v1", amd64, cpuBits("7")), compat("v1", amd64), false},
 		{"key only the snapshot has fails", compat("v1", amd64), compat("v1", amd64, cpuBits("7")), false},
 		{"key only the snapshot has fails even at equal count", compat("v1", amd64, cpuBits("7")), compat("v1", amd64, hash), false},
 		{"value differs", compat("v1", arm64), compat("v1", amd64), false},
@@ -361,5 +361,172 @@ func TestWorkerRuntimeFor(t *testing.T) {
 	}
 	if got := NewRequirement(nil).WorkerRuntimeFor(&ateapi.WorkerStatus{}); got != nil {
 		t.Errorf("WorkerRuntimeFor() before registration = %v, want nil", got)
+	}
+}
+
+func TestMaxFidelityAndWithMinFidelity(t *testing.T) {
+	attr := func(k, v string) *ateapi.AttributeEntry {
+		return &ateapi.AttributeEntry{Key: k, Value: v}
+	}
+	rt := func(class string, attrs ...*ateapi.AttributeEntry) *ateapi.ActorSandboxRuntime {
+		return &ateapi.ActorSandboxRuntime{
+			SandboxClass: class,
+			Version: &ateapi.VersionedSandboxCompat{
+				SchemaVersion: SchemaVersionV1,
+				Attributes:    attrs,
+			},
+		}
+	}
+
+	baseSnap := rt("gvisor",
+		attr(AttrArchitecture, "amd64"),
+		attr(AttrSandboxBundleHash, "bundle-1"),
+		attr(AttrCPUFeatures, "7"),
+		attr(AttrMemoryCompat, "mem-1"),
+		attr(AttrRootfsCompat, "v1"),
+		attr(AttrVolumesCompat, "v1"),
+	)
+
+	for _, tc := range []struct {
+		name   string
+		worker *ateapi.ActorSandboxRuntime
+		snap   *ateapi.ActorSandboxRuntime
+		want   ateapi.SnapshotFidelity
+	}{
+		{
+			name:   "nil snap returns MEMORY",
+			worker: baseSnap,
+			snap:   nil,
+			want:   ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+		},
+		{
+			name:   "exact match returns MEMORY",
+			worker: baseSnap,
+			snap:   baseSnap,
+			want:   ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+		},
+		{
+			name: "memory_compat mismatch degrades to ROOTFS",
+			worker: rt("gvisor",
+				attr(AttrArchitecture, "amd64"),
+				attr(AttrSandboxBundleHash, "bundle-1"),
+				attr(AttrCPUFeatures, "7"),
+				attr(AttrMemoryCompat, "mem-2"),
+				attr(AttrRootfsCompat, "v1"),
+				attr(AttrVolumesCompat, "v1"),
+			),
+			snap: baseSnap,
+			want: ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS,
+		},
+		{
+			name: "sandbox_bundle_hash mismatch degrades to ROOTFS",
+			worker: rt("gvisor",
+				attr(AttrArchitecture, "amd64"),
+				attr(AttrSandboxBundleHash, "bundle-2"),
+				attr(AttrCPUFeatures, "7"),
+				attr(AttrMemoryCompat, "mem-1"),
+				attr(AttrRootfsCompat, "v1"),
+				attr(AttrVolumesCompat, "v1"),
+			),
+			snap: baseSnap,
+			want: ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS,
+		},
+		{
+			name: "cpu_features missing bit degrades to ROOTFS",
+			worker: rt("gvisor",
+				attr(AttrArchitecture, "amd64"),
+				attr(AttrSandboxBundleHash, "bundle-1"),
+				attr(AttrCPUFeatures, "3"),
+				attr(AttrMemoryCompat, "mem-1"),
+				attr(AttrRootfsCompat, "v1"),
+				attr(AttrVolumesCompat, "v1"),
+			),
+			snap: baseSnap,
+			want: ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS,
+		},
+		{
+			name: "rootfs_compat mismatch degrades to VOLUMES",
+			worker: rt("gvisor",
+				attr(AttrArchitecture, "amd64"),
+				attr(AttrSandboxBundleHash, "bundle-1"),
+				attr(AttrCPUFeatures, "7"),
+				attr(AttrMemoryCompat, "mem-1"),
+				attr(AttrRootfsCompat, "v2"),
+				attr(AttrVolumesCompat, "v1"),
+			),
+			snap: baseSnap,
+			want: ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES,
+		},
+		{
+			name: "memory_compat and rootfs_compat mismatch takes minimum VOLUMES",
+			worker: rt("gvisor",
+				attr(AttrArchitecture, "amd64"),
+				attr(AttrSandboxBundleHash, "bundle-2"),
+				attr(AttrCPUFeatures, "7"),
+				attr(AttrMemoryCompat, "mem-2"),
+				attr(AttrRootfsCompat, "v2"),
+				attr(AttrVolumesCompat, "v1"),
+			),
+			snap: baseSnap,
+			want: ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES,
+		},
+		{
+			name: "volumes_compat mismatch degrades to UNSPECIFIED",
+			worker: rt("gvisor",
+				attr(AttrArchitecture, "amd64"),
+				attr(AttrSandboxBundleHash, "bundle-1"),
+				attr(AttrCPUFeatures, "7"),
+				attr(AttrMemoryCompat, "mem-1"),
+				attr(AttrRootfsCompat, "v1"),
+				attr(AttrVolumesCompat, "v2"),
+			),
+			snap: baseSnap,
+			want: ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_UNSPECIFIED,
+		},
+		{
+			name: "architecture mismatch degrades to UNSPECIFIED",
+			worker: rt("gvisor",
+				attr(AttrArchitecture, "arm64"),
+				attr(AttrSandboxBundleHash, "bundle-1"),
+				attr(AttrCPUFeatures, "7"),
+				attr(AttrMemoryCompat, "mem-1"),
+				attr(AttrRootfsCompat, "v1"),
+				attr(AttrVolumesCompat, "v1"),
+			),
+			snap: baseSnap,
+			want: ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_UNSPECIFIED,
+		},
+		{
+			name:   "sandbox class mismatch degrades to UNSPECIFIED",
+			worker: rt("microvm", baseSnap.GetVersion().GetAttributes()...),
+			snap:   baseSnap,
+			want:   ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_UNSPECIFIED,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := MaxFidelityForRuntime(tc.worker, tc.snap); got != tc.want {
+				t.Errorf("MaxFidelityForRuntime() = %v, want %v", got, tc.want)
+			}
+			status := &ateapi.WorkerStatus{SandboxClasses: []*ateapi.WorkerSandboxClass{{
+				SandboxClass:   tc.worker.GetSandboxClass(),
+				DefaultRuntime: &ateapi.WorkerSandboxRuntime{Version: tc.worker.GetVersion()},
+			}}}
+			if got := MaxFidelity(status, tc.snap); got != tc.want {
+				t.Errorf("MaxFidelity() = %v, want %v", got, tc.want)
+			}
+
+			req := NewRequirement(tc.snap)
+			for _, minFid := range []ateapi.SnapshotFidelity{
+				ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+				ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS,
+				ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES,
+			} {
+				r := req.WithMinFidelity(minFid)
+				wantMatch := tc.snap == nil || tc.want >= minFid
+				if got := r.WorkerMatches(status); got != wantMatch {
+					t.Errorf("WithMinFidelity(%v).WorkerMatches() = %v, want %v (maxFidelity=%v)", minFid, got, wantMatch, tc.want)
+				}
+			}
+		})
 	}
 }

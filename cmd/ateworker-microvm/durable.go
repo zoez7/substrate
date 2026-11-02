@@ -51,6 +51,11 @@ import (
 	"go.ate.dev/substrate/internal/tarutil"
 )
 
+// microvmVolumesCompat identifies the microVM durable-dir volume tar format
+// (durable-dir-<volumeName>.tar, relative to the volume dir with a root entry).
+// Bump this constant when changing durableTarFile or its archive layout.
+const microvmVolumesCompat = "v1"
+
 // durableTarFile is the snapshot file holding the tar of one durable-dir
 // volume: the contents of <volumeName> under
 // ActorDirs.durable_dir_volume_mounts_dir, plus a root entry for the volume

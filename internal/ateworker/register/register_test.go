@@ -917,3 +917,51 @@ func TestReconcilerSyncReportsActorOverhead(t *testing.T) {
 		t.Errorf("reported %d restorable runtimes, want 1", len(c.GetRestorableRuntimes()))
 	}
 }
+
+func TestReconcilerSyncReportsRuntimeAttributes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), nodepath.SandboxRuntimesFileName)
+	f := gvisorFile(sandboxruntimes.Attributes{
+		hardware.AttrArchitecture:      "amd64",
+		hardware.AttrSandboxBundleHash: "sha256:v2",
+	}, sandboxruntimes.Attributes{
+		hardware.AttrArchitecture:      "amd64",
+		hardware.AttrSandboxBundleHash: "sha256:v1",
+	})
+	if _, err := sandboxruntimes.Write(path, f); err != nil {
+		t.Fatal(err)
+	}
+	runtimeAttrs := []*ateletpb.AttributeEntry{
+		{Key: hardware.AttrVolumesCompat, Value: "v1"},
+		{Key: hardware.AttrMemoryCompat, Value: "sha256:mem"},
+		{Key: hardware.AttrRootfsCompat, Value: "v1"},
+	}
+	var got *ateletpb.SetWorkerSandboxRuntimesRequest
+	r := newReconciler(
+		ReportConfig{SandboxClass: "gvisor", RuntimesFile: path, RuntimeAttributes: runtimeAttrs},
+		3,
+		func() (*sandboxruntimes.File, error) { return sandboxruntimes.Read(path) },
+		func(_ context.Context, req *ateletpb.SetWorkerSandboxRuntimesRequest) error {
+			got = req
+			return nil
+		},
+	)
+	if retry, err := r.sync(context.Background()); retry || err != nil {
+		t.Fatalf("sync() = %v, %v, want false, nil", retry, err)
+	}
+	c := got.GetSandboxClasses()[0]
+	wantFor := func(bundleHash string) []*ateletpb.AttributeEntry {
+		return []*ateletpb.AttributeEntry{
+			{Key: hardware.AttrArchitecture, Value: "amd64"},
+			{Key: hardware.AttrMemoryCompat, Value: "sha256:mem"},
+			{Key: hardware.AttrRootfsCompat, Value: "v1"},
+			{Key: hardware.AttrSandboxBundleHash, Value: bundleHash},
+			{Key: hardware.AttrVolumesCompat, Value: "v1"},
+		}
+	}
+	if diff := cmp.Diff(wantFor("sha256:v2"), c.GetDefaultRuntime().GetVersion().GetAttributes(), protocmp.Transform()); diff != "" {
+		t.Errorf("default runtime attributes mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(wantFor("sha256:v1"), c.GetRestorableRuntimes()[0].GetVersion().GetAttributes(), protocmp.Transform()); diff != "" {
+		t.Errorf("restorable runtime attributes mismatch (-want +got):\n%s", diff)
+	}
+}

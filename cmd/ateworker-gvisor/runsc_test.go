@@ -31,6 +31,7 @@ import (
 
 	"go.ate.dev/substrate/internal/actorlock"
 	"go.ate.dev/substrate/internal/apierror"
+	"go.ate.dev/substrate/internal/hardware"
 	"go.ate.dev/substrate/internal/ocispec"
 	"go.ate.dev/substrate/internal/proto/ateworkerpb"
 )
@@ -403,5 +404,22 @@ func TestRestoreWorkloadRejectsEmptyRestoreDir(t *testing.T) {
 				t.Fatalf("RestoreWorkload() = %v, want InvalidArgument naming %s", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestGVisorRuntimeAttributes(t *testing.T) {
+	attrs := gvisorRuntimeAttributes()
+	byKey := make(map[string]string, len(attrs))
+	for _, a := range attrs {
+		byKey[a.GetKey()] = a.GetValue()
+	}
+	if got := byKey[hardware.AttrMemoryCompat]; !strings.HasPrefix(got, "sha256:") || len(got) != len("sha256:")+64 {
+		t.Errorf("memory_compat = %q, want sha256:<64 hex chars>", got)
+	}
+	if got := byKey[hardware.AttrRootfsCompat]; got != "v1" {
+		t.Errorf("rootfs_compat = %q, want v1", got)
+	}
+	if got := byKey[hardware.AttrVolumesCompat]; got != "v1" {
+		t.Errorf("volumes_compat = %q, want v1", got)
 	}
 }
