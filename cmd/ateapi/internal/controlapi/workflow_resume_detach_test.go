@@ -211,12 +211,39 @@ func TestDetachFromFullNode(t *testing.T) {
 		wantDetached: true,
 		wantCall:     true,
 	}, {
-		name:         "room only on another architecture: does not detach",
+		name:         "room only on another architecture: detaches",
 		node:         "node-1",
 		otherNode:    true,
 		otherRuntime: arm64RT,
 		snapRuntime:  amd64RT,
-		wantCode:     codes.ResourceExhausted,
+		detachState:  detachedState,
+		wantDetached: true,
+		wantCall:     true,
+	}, {
+		name:      "room only with incompatible volumes_compat: does not detach",
+		node:      "node-1",
+		otherNode: true,
+		otherRuntime: &ateapi.ActorSandboxRuntime{
+			SandboxClass: "gvisor",
+			Version: &ateapi.VersionedSandboxCompat{
+				SchemaVersion: "v1",
+				Attributes: []*ateapi.AttributeEntry{
+					{Key: "architecture", Value: "amd64"},
+					{Key: "volumes_compat", Value: "v2"},
+				},
+			},
+		},
+		snapRuntime: &ateapi.ActorSandboxRuntime{
+			SandboxClass: "gvisor",
+			Version: &ateapi.VersionedSandboxCompat{
+				SchemaVersion: "v1",
+				Attributes: []*ateapi.AttributeEntry{
+					{Key: "architecture", Value: "amd64"},
+					{Key: "volumes_compat", Value: "v1"},
+				},
+			},
+		},
+		wantCode: codes.ResourceExhausted,
 	}, {
 		name:         "no atelet on the node, upload completed: detaches",
 		node:         "node-3",

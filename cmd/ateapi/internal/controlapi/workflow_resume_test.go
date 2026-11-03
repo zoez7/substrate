@@ -1862,13 +1862,18 @@ func TestResumeActor_AteletWireRequest(t *testing.T) {
 			want: restoreWant{code: codes.FailedPrecondition},
 		},
 		{
-			name: "24f stamped durable snapshot with architecture mismatch fails with FailedPrecondition",
+			name: "24f stamped durable snapshot with architecture mismatch drops to Volumes",
 			actor: actorSeed{
 				externalSnapshot: stampedExtSnap(ateapi.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, actorURI, fullScope, amd64RT),
 				tmplUID:          "current",
 				assignedRuntime:  arm64RT,
 			},
-			want: restoreWant{code: codes.FailedPrecondition},
+			want: restoreWant{
+				snapshotName: durableSnapshotName,
+				kind:         ateattr.SnapshotKindLatest,
+				snapshotURI:  actorURI,
+				scope:        ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES,
+			},
 		},
 		{
 			name: "24b stamped local snapshot on matching worker restores in Full",
@@ -2823,15 +2828,95 @@ func TestAssignWorkerAttempt_PrefersRuntimeMatchingWorkerAndFallsBack(t *testing
 		assertAssignedRuntime(t, stored, newDefaultRT)
 	})
 
-	t.Run("does not fall back to a worker of another architecture", func(t *testing.T) {
+	t.Run("steps down to same-architecture ROOTFS worker before cross-architecture VOLUMES worker", func(t *testing.T) {
 		ctx := context.Background()
 		st := newTestPersistence(t)
-		seedRuntimeWorker(t, ctx, st, "arm-pod", "node-arm", arm64RT)
-		actor := seedActorWithSnapshot(t, ctx, st, suspended, "", durableMemorySnapshot(t, amd64RT))
+		arm64SnapRT := testRuntime("arm64", "snap-bundle")
+		arm64OtherBundleRT := testRuntime("arm64", "other-bundle")
+		seedRuntimeWorker(t, ctx, st, "amd-pod", "node-amd", amd64RT)
+		seedRuntimeWorker(t, ctx, st, "arm-pod", "node-1", arm64OtherBundleRT)
+		actor := seedActorWithSnapshot(t, ctx, st, suspended, "", durableMemorySnapshot(t, arm64SnapRT))
+
+		fakeAtelet := &capturingAtelet{}
+		w := newSchedulingWorkflow(t, ctx, st)
+		w.dialer = newNodeAteletDialer(t, fakeAtelet)
+
+		stored, worker, err := w.assignWorkerAttempt(ctx, actorRef, actor, &ateapi.ActorTemplate{})
+		if err != nil {
+			t.Fatalf("assignWorkerAttempt: %v", err)
+		}
+		if got := worker.GetWorkerPod(); got != "arm-pod" {
+			t.Errorf("assigned worker = %q, want %q", got, "arm-pod")
+		}
+		assertAssignedRuntime(t, stored, arm64OtherBundleRT)
+
+		if _, _, err := w.ensureAteletRestored(ctx, actorRef, stored, &ateapi.ActorTemplate{}, nil); err != nil {
+			t.Fatalf("ensureAteletRestored: %v", err)
+		}
+		restore, _ := fakeAtelet.requests()
+		if got := restore.GetSnapshot().GetFidelity(); got != ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS {
+			t.Errorf("Restore fidelity = %v, want %v", got, ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS)
+		}
+	})
+
+	t.Run("falls back to cross-architecture worker at VOLUMES when no same-architecture worker has room", func(t *testing.T) {
+		ctx := context.Background()
+		st := newTestPersistence(t)
+		arm64SnapRT := testRuntime("arm64", "snap-bundle")
+		seedRuntimeWorker(t, ctx, st, "amd-pod", "node-1", amd64RT)
+		actor := seedActorWithSnapshot(t, ctx, st, suspended, "", durableMemorySnapshot(t, arm64SnapRT))
+
+		fakeAtelet := &capturingAtelet{}
+		w := newSchedulingWorkflow(t, ctx, st)
+		w.dialer = newNodeAteletDialer(t, fakeAtelet)
+
+		stored, worker, err := w.assignWorkerAttempt(ctx, actorRef, actor, &ateapi.ActorTemplate{})
+		if err != nil {
+			t.Fatalf("assignWorkerAttempt: %v", err)
+		}
+		if got := worker.GetWorkerPod(); got != "amd-pod" {
+			t.Errorf("assigned worker = %q, want %q", got, "amd-pod")
+		}
+		assertAssignedRuntime(t, stored, amd64RT)
+
+		if _, _, err := w.ensureAteletRestored(ctx, actorRef, stored, &ateapi.ActorTemplate{}, nil); err != nil {
+			t.Fatalf("ensureAteletRestored: %v", err)
+		}
+		restore, _ := fakeAtelet.requests()
+		if got := restore.GetSnapshot().GetFidelity(); got != ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES {
+			t.Errorf("Restore fidelity = %v, want %v", got, ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES)
+		}
+	})
+
+	t.Run("does not fall back when volumes_compat is incompatible", func(t *testing.T) {
+		ctx := context.Background()
+		st := newTestPersistence(t)
+		snapRT := &ateapi.ActorSandboxRuntime{
+			SandboxClass: "gvisor",
+			Version: &ateapi.VersionedSandboxCompat{
+				SchemaVersion: "v1",
+				Attributes: []*ateapi.AttributeEntry{
+					{Key: hardware.AttrArchitecture, Value: "amd64"},
+					{Key: hardware.AttrVolumesCompat, Value: "v1"},
+				},
+			},
+		}
+		workerRT := &ateapi.ActorSandboxRuntime{
+			SandboxClass: "gvisor",
+			Version: &ateapi.VersionedSandboxCompat{
+				SchemaVersion: "v1",
+				Attributes: []*ateapi.AttributeEntry{
+					{Key: hardware.AttrArchitecture, Value: "amd64"},
+					{Key: hardware.AttrVolumesCompat, Value: "v2"},
+				},
+			},
+		}
+		seedRuntimeWorker(t, ctx, st, "incompat-pod", "node-1", workerRT)
+		actor := seedActorWithSnapshot(t, ctx, st, suspended, "", durableMemorySnapshot(t, snapRT))
 
 		_, _, err := newSchedulingWorkflow(t, ctx, st).assignWorkerAttempt(ctx, actorRef, actor, &ateapi.ActorTemplate{})
 		if apierror.Code(err) != codes.ResourceExhausted {
-			t.Fatalf("assignWorkerAttempt with only an arm64 worker = %v, want ResourceExhausted", err)
+			t.Fatalf("assignWorkerAttempt with incompatible volumes_compat = %v, want ResourceExhausted", err)
 		}
 	})
 

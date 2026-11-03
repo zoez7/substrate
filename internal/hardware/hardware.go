@@ -67,9 +67,9 @@ const (
 // still achieve when key fails to match between the worker and the snapshot.
 func attributeMismatchFidelity(key string) ateapi.SnapshotFidelity {
 	switch key {
-	case AttrArchitecture, AttrVolumesCompat:
+	case AttrVolumesCompat:
 		return ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_UNSPECIFIED
-	case AttrRootfsCompat:
+	case AttrArchitecture, AttrRootfsCompat:
 		return ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES
 	case AttrSandboxBundleHash, AttrCPUFeatures, AttrCPUVendor, AttrCPUModel, AttrMemoryCompat:
 		return ateapi.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS
