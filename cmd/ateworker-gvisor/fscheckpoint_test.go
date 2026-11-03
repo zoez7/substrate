@@ -318,3 +318,36 @@ func TestFSRestoreContainers(t *testing.T) {
 		}
 	}
 }
+
+func TestFallbackFidelities(t *testing.T) {
+	for _, tc := range []struct {
+		ceiling ateworkerpb.SnapshotFidelity
+		want    []ateworkerpb.SnapshotFidelity
+	}{
+		{
+			ceiling: ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+			want: []ateworkerpb.SnapshotFidelity{
+				ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+				ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS,
+				ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES,
+			},
+		},
+		{
+			ceiling: ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS,
+			want: []ateworkerpb.SnapshotFidelity{
+				ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS,
+				ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES,
+			},
+		},
+		{
+			ceiling: ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES,
+			want: []ateworkerpb.SnapshotFidelity{
+				ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES,
+			},
+		},
+	} {
+		if got := fallbackFidelities(tc.ceiling); !slices.Equal(got, tc.want) {
+			t.Errorf("fallbackFidelities(%v) = %v, want %v", tc.ceiling, got, tc.want)
+		}
+	}
+}

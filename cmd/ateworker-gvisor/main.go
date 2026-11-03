@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -546,6 +547,15 @@ type containerRuntime interface {
 	cmdState(ctx context.Context, containerName string) error
 	cmdDelete(ctx context.Context, containerName string) error
 	cmdList(ctx context.Context) ([]string, error)
+}
+
+// restoreRuntime is the slice of *runsc that restoring or cold-booting a
+// sandbox and its application containers needs.
+type restoreRuntime interface {
+	cmdCreate(ctx context.Context, logWriter io.Writer, containerName string, extraArgs []string) error
+	cmdStart(ctx context.Context, logWriter io.Writer, containerName string) error
+	cmdRestore(ctx context.Context, logWriter io.Writer, containerName, checkpointPath string) error
+	cmdDelete(ctx context.Context, containerName string) error
 }
 
 // killContainer stops a container by sending SIGTERM, waiting until deadline, and
@@ -1226,85 +1236,9 @@ func (s *AteWorkerService) RestoreWorkload(ctx context.Context, req *ateworkerpb
 		return nil, err
 	}
 	checkpointDir := req.GetActorDirs().GetRestoreDir()
-	restoreArgs, err := fsRestoreArgs(checkpointDir, fidelity)
+	fidelity, restoreArgs, err := s.restoreWithFallback(ctx, rcmd, hosted, attribution, req.GetActorDirs(), containers, fidelity, &containersToDelete, &timing, &tLast)
 	if err != nil {
 		return nil, err
-	}
-
-	// Attribute the sandbox's runsc CLI output to the actor.
-	pw, err := s.actorLogger.StartJSONLogPipe(attribution, ocispec.SandboxID)
-	if err != nil {
-		return nil, fmt.Errorf("while starting sandbox log pipe: %w", err)
-	}
-	defer pw.Close()
-	switch fidelity {
-	case ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES, ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS:
-		// Create and start the sandbox (cold boot with filesystem checkpoint bundles restored)
-		containersToDelete = append(containersToDelete, ocispec.SandboxID)
-		err := rcmd.cmdCreate(ctx, pw, ocispec.SandboxID, restoreArgs)
-		timing.sandboxCreate = lap(&tLast)
-		if err != nil {
-			return nil, fmt.Errorf("while creating the sandbox: %w", err)
-		}
-		s.pinSandbox(ctx, hosted, req.GetActorDirs())
-		s.throttleSandboxMemory(ctx, hosted)
-		err = rcmd.cmdStart(ctx, pw, ocispec.SandboxID)
-		timing.sandboxRestore = lap(&tLast)
-		if err != nil {
-			return nil, fmt.Errorf("while starting the sandbox: %w", err)
-		}
-	case ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY:
-		// Create and restore the sandbox (restores process state and filesystem checkpoint bundles)
-		containersToDelete = append(containersToDelete, ocispec.SandboxID)
-		err := rcmd.cmdCreate(ctx, pw, ocispec.SandboxID, restoreArgs)
-		timing.sandboxCreate = lap(&tLast)
-		if err != nil {
-			return nil, fmt.Errorf("while creating the sandbox: %w", err)
-		}
-		s.pinSandbox(ctx, hosted, req.GetActorDirs())
-		s.throttleSandboxMemory(ctx, hosted)
-		err = rcmd.cmdRestore(ctx, pw, ocispec.SandboxID, checkpointDir)
-		timing.sandboxRestore = lap(&tLast)
-		if err != nil {
-			return nil, fmt.Errorf("while restoring the sandbox: %w", err)
-		}
-	}
-
-	// Create and restore each application container, each with its own log pipe so
-	// every line is tagged with the originating container (ate.actor.container.name).
-	// app_create includes starting that pipe.
-	for _, ac := range containers {
-		pw, err := s.actorLogger.StartJSONLogPipe(attribution, ac.GetName())
-		timing.appCreate += lap(&tLast)
-		if err != nil {
-			return nil, fmt.Errorf("while starting json log pipe for %q: %w", ac.GetName(), err)
-		}
-		defer pw.Close()
-		err = setupAppRootfs(req.GetActorDirs(), ac.GetName())
-		timing.appRootfs += lap(&tLast)
-		if err != nil {
-			return nil, fmt.Errorf("while composing %q rootfs: %w", ac.GetName(), err)
-		}
-		containersToDelete = append(containersToDelete, ac.GetName())
-		err = rcmd.cmdCreate(ctx, pw, ac.GetName(), nil)
-		timing.appCreate += lap(&tLast)
-		if err != nil {
-			return nil, fmt.Errorf("while creating %q application container: %w", ac.GetName(), err)
-		}
-		switch fidelity {
-		case ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES, ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS:
-			err = rcmd.cmdStart(ctx, pw, ac.GetName())
-			timing.appRestore += lap(&tLast)
-			if err != nil {
-				return nil, fmt.Errorf("while starting %q application container: %w", ac.GetName(), err)
-			}
-		case ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY:
-			err = rcmd.cmdRestore(ctx, pw, ac.GetName(), checkpointDir)
-			timing.appRestore += lap(&tLast)
-			if err != nil {
-				return nil, fmt.Errorf("while restoring %q application container: %w", ac.GetName(), err)
-			}
-		}
 	}
 
 	// Block until every wakeup-probe-enabled container reports 200.
@@ -1423,7 +1357,167 @@ func (s *AteWorkerService) terminateWorkload(ctx context.Context, actorRef resou
 	return errors.Join(errs...)
 }
 
-func deleteContainers(ctx context.Context, rcmd *runsc, containers []string, operation string) {
+func (s *AteWorkerService) restoreWithFallback(
+	ctx context.Context,
+	rcmd restoreRuntime,
+	hosted *hostedActor,
+	attribution resources.ActorAttribution,
+	actorDirs *ateworkerpb.ActorDirs,
+	containers []*ateworkerpb.Container,
+	requestedFidelity ateworkerpb.SnapshotFidelity,
+	containersToDelete *[]string,
+	timing *restoreTiming,
+	tLast *time.Time,
+) (ateworkerpb.SnapshotFidelity, []string, error) {
+	candidates := fallbackFidelities(requestedFidelity)
+	for i, candidate := range candidates {
+		restoreArgs, err := s.restoreAtFidelity(ctx, rcmd, hosted, attribution, actorDirs, containers, candidate, containersToDelete, timing, tLast)
+		if err == nil {
+			return candidate, restoreArgs, nil
+		}
+		if i == len(candidates)-1 {
+			return candidate, nil, err
+		}
+		next := candidates[i+1]
+		slog.WarnContext(ctx, "Restore attempt failed, stepping down to lower snapshot fidelity",
+			slog.String("actor", attribution.Ref.String()),
+			slog.String("actorUID", attribution.UID),
+			slog.String("failedFidelity", candidate.String()),
+			slog.String("nextFidelity", next.String()),
+			slog.Any("err", err),
+		)
+		s.resetFailedRestoreAttempt(ctx, rcmd, hosted, attribution.UID, actorDirs, containersToDelete)
+	}
+	return requestedFidelity, nil, fmt.Errorf("no restore candidates for fidelity %v", requestedFidelity)
+}
+
+func (s *AteWorkerService) restoreAtFidelity(
+	ctx context.Context,
+	rcmd restoreRuntime,
+	hosted *hostedActor,
+	attribution resources.ActorAttribution,
+	actorDirs *ateworkerpb.ActorDirs,
+	containers []*ateworkerpb.Container,
+	fidelity ateworkerpb.SnapshotFidelity,
+	containersToDelete *[]string,
+	timing *restoreTiming,
+	tLast *time.Time,
+) ([]string, error) {
+	checkpointDir := actorDirs.GetRestoreDir()
+	restoreArgs, err := fsRestoreArgs(checkpointDir, fidelity)
+	if err != nil {
+		return nil, err
+	}
+
+	// Attribute the sandbox's runsc CLI output to the actor.
+	pw, err := s.actorLogger.StartJSONLogPipe(attribution, ocispec.SandboxID)
+	if err != nil {
+		return nil, fmt.Errorf("while starting sandbox log pipe: %w", err)
+	}
+	defer pw.Close()
+	switch fidelity {
+	case ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES, ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS:
+		// Create and start the sandbox (cold boot with filesystem checkpoint bundles restored)
+		*containersToDelete = append(*containersToDelete, ocispec.SandboxID)
+		err := rcmd.cmdCreate(ctx, pw, ocispec.SandboxID, restoreArgs)
+		timing.sandboxCreate += lap(tLast)
+		if err != nil {
+			return nil, fmt.Errorf("while creating the sandbox: %w", err)
+		}
+		s.pinSandbox(ctx, hosted, actorDirs)
+		s.throttleSandboxMemory(ctx, hosted)
+		err = rcmd.cmdStart(ctx, pw, ocispec.SandboxID)
+		timing.sandboxRestore += lap(tLast)
+		if err != nil {
+			return nil, fmt.Errorf("while starting the sandbox: %w", err)
+		}
+	case ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY:
+		// Create and restore the sandbox (restores process state and filesystem checkpoint bundles)
+		*containersToDelete = append(*containersToDelete, ocispec.SandboxID)
+		err := rcmd.cmdCreate(ctx, pw, ocispec.SandboxID, restoreArgs)
+		timing.sandboxCreate += lap(tLast)
+		if err != nil {
+			return nil, fmt.Errorf("while creating the sandbox: %w", err)
+		}
+		s.pinSandbox(ctx, hosted, actorDirs)
+		s.throttleSandboxMemory(ctx, hosted)
+		err = rcmd.cmdRestore(ctx, pw, ocispec.SandboxID, checkpointDir)
+		timing.sandboxRestore += lap(tLast)
+		if err != nil {
+			return nil, fmt.Errorf("while restoring the sandbox: %w", err)
+		}
+	}
+
+	// Create and restore each application container, each with its own log pipe so
+	// every line is tagged with the originating container (ate.actor.container.name).
+	// app_create includes starting that pipe.
+	for _, ac := range containers {
+		pw, err := s.actorLogger.StartJSONLogPipe(attribution, ac.GetName())
+		timing.appCreate += lap(tLast)
+		if err != nil {
+			return nil, fmt.Errorf("while starting json log pipe for %q: %w", ac.GetName(), err)
+		}
+		defer pw.Close()
+		err = setupAppRootfs(actorDirs, ac.GetName())
+		timing.appRootfs += lap(tLast)
+		if err != nil {
+			return nil, fmt.Errorf("while composing %q rootfs: %w", ac.GetName(), err)
+		}
+		*containersToDelete = append(*containersToDelete, ac.GetName())
+		err = rcmd.cmdCreate(ctx, pw, ac.GetName(), nil)
+		timing.appCreate += lap(tLast)
+		if err != nil {
+			return nil, fmt.Errorf("while creating %q application container: %w", ac.GetName(), err)
+		}
+		switch fidelity {
+		case ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES, ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS:
+			err = rcmd.cmdStart(ctx, pw, ac.GetName())
+			timing.appRestore += lap(tLast)
+			if err != nil {
+				return nil, fmt.Errorf("while starting %q application container: %w", ac.GetName(), err)
+			}
+		case ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY:
+			err = rcmd.cmdRestore(ctx, pw, ac.GetName(), checkpointDir)
+			timing.appRestore += lap(tLast)
+			if err != nil {
+				return nil, fmt.Errorf("while restoring %q application container: %w", ac.GetName(), err)
+			}
+		}
+	}
+	return restoreArgs, nil
+}
+
+func (s *AteWorkerService) resetFailedRestoreAttempt(
+	ctx context.Context,
+	rcmd restoreRuntime,
+	hosted *hostedActor,
+	actorUID string,
+	actorDirs *ateworkerpb.ActorDirs,
+	containersToDelete *[]string,
+) {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	if hosted != nil {
+		hosted.memory.Pause()
+	}
+	s.unpinSandbox(hosted)
+	deleteContainers(cleanupCtx, rcmd, *containersToDelete, "Restore")
+	*containersToDelete = nil
+	if err := imagecache.UnmountAllUnder(actorDirs.GetOciBundleDir()); err != nil {
+		slog.WarnContext(cleanupCtx, "Failed to unmount bundle rootfs overlays after Restore attempt failure",
+			slog.String("actorUID", actorUID), slog.Any("err", err))
+	}
+	if err := resetRunscStateAndPidFileDirs(actorDirs); err != nil {
+		slog.WarnContext(cleanupCtx, "Failed to reset runsc state and pid file dirs after Restore attempt failure",
+			slog.String("actorUID", actorUID), slog.Any("err", err))
+	}
+	if err := s.removeStaleSandboxLeaf(cleanupCtx, actorUID); err != nil {
+		slog.WarnContext(cleanupCtx, "Failed to remove sandbox cgroup leaf after Restore attempt failure",
+			slog.String("actorUID", actorUID), slog.Any("err", err))
+	}
+}
+
+func deleteContainers(ctx context.Context, rcmd restoreRuntime, containers []string, operation string) {
 	for _, container := range slices.Backward(containers) {
 		if err := rcmd.cmdDelete(ctx, container); err != nil {
 			slog.WarnContext(ctx, "Failed to delete runsc container after failure",

@@ -146,12 +146,7 @@ func (s *AteWorkerService) unhostActor(ctx context.Context, actorUID string) err
 		s.actorsMu.Unlock()
 	}()
 
-	s.actorsMu.Lock()
-	if hosted.sandbox != nil {
-		hosted.sandbox.Close()
-		hosted.sandbox = nil
-	}
-	s.actorsMu.Unlock()
+	s.unpinSandbox(hosted)
 	if hosted.network == nil {
 		return nil
 	}
@@ -170,7 +165,23 @@ func (s *AteWorkerService) pinSandbox(ctx context.Context, hosted *hostedActor, 
 		return
 	}
 	s.actorsMu.Lock()
+	if hosted.sandbox != nil {
+		hosted.sandbox.Close()
+	}
 	hosted.sandbox = sandbox
+	s.actorsMu.Unlock()
+}
+
+// unpinSandbox closes the actor's pinned sandbox process handle if open.
+func (s *AteWorkerService) unpinSandbox(hosted *hostedActor) {
+	if hosted == nil {
+		return
+	}
+	s.actorsMu.Lock()
+	if hosted.sandbox != nil {
+		hosted.sandbox.Close()
+		hosted.sandbox = nil
+	}
 	s.actorsMu.Unlock()
 }
 

@@ -169,3 +169,25 @@ func fsRestoreContainers(fidelity ateworkerpb.SnapshotFidelity, containers []*at
 	}
 	return out
 }
+
+// fallbackFidelities returns the ordered restore candidates starting at
+// ceiling and stepping down to VOLUMES.
+func fallbackFidelities(ceiling ateworkerpb.SnapshotFidelity) []ateworkerpb.SnapshotFidelity {
+	switch ceiling {
+	case ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY:
+		return []ateworkerpb.SnapshotFidelity{
+			ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+			ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS,
+			ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES,
+		}
+	case ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS:
+		return []ateworkerpb.SnapshotFidelity{
+			ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS,
+			ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES,
+		}
+	default:
+		return []ateworkerpb.SnapshotFidelity{
+			ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES,
+		}
+	}
+}
